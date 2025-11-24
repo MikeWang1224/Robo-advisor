@@ -1,4 +1,4 @@
-name: Run RAG Program and Save Result
+name: Run robo Program and Save Result
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
-          python RAG_Test.py > results/result_${today}.txt
+          python robo.py > results/result_${today}.txt
           cat results/result_${today}.txt
           echo "TODAY=$today" >> $GITHUB_ENV
 
