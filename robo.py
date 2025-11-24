@@ -7,6 +7,7 @@
 
 import re
 import json
+import os
 from datetime import datetime, timezone
 from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass, asdict
@@ -17,6 +18,7 @@ from google.cloud import firestore
 # ------------------ 設定 ------------------
 INITIAL_CAPITAL = 1_000_000
 MAX_PER_TRADE = 50_000
+
 FIRESTORE_PORTFOLIO_COLLECTION = "Trading_Portfolio"
 FIRESTORE_ORDERS_COLLECTION = "Trading_Orders"
 
@@ -25,6 +27,9 @@ RESULT_COLLECTIONS = {
     "Groq_result_Foxxcon": ("鴻海", "2317"),
     "Groq_result_UMC": ("聯電", "2303"),
 }
+
+# ✅ 你的 GitHub 專案資料夾路徑（自己改成你的實際路徑）
+GITHUB_RESULTS_FOLDER = r"./github_results"
 
 # ------------------ Dataclasses ------------------
 @dataclass
@@ -53,7 +58,7 @@ def get_db():
 def get_twse_price(stock_no: str) -> float:
     url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{stock_no}.tw"
     try:
-        r = requests.get(url)
+        r = requests.get(url, timeout=5)
         data = r.json()
         msg = data.get("msgArray", [])
         if msg and "z" in msg[0]:
@@ -70,7 +75,7 @@ def read_latest_result(db: firestore.Client, collection_name: str) -> Optional[D
         docs = coll.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1).stream()
         for d in docs:
             data = d.to_dict() or {}
-            data['_doc_id'] = d.id
+            data["_doc_id"] = d.id
             return data
     except Exception as e:
         print(f"[warning] 讀取 {collection_name} 失敗：{e}")
@@ -82,18 +87,14 @@ def parse_trend_and_score(result_text: str) -> Tuple[Optional[str], Optional[int
     txt = result_text
     trend = None
 
-    m = re.search(r"明天[^\n：]*股價走勢：?\s*([上微下漲跌]{2,3})", txt)
-    if m:
-        trend = m.group(1)
-    else:
-        if "上漲" in txt:
-            trend = "上漲"
-        elif "微漲" in txt:
-            trend = "微漲"
-        elif "微跌" in txt:
-            trend = "微跌"
-        elif "下跌" in txt:
-            trend = "下跌"
+    if "上漲" in txt:
+        trend = "上漲"
+    elif "微漲" in txt:
+        trend = "微漲"
+    elif "微跌" in txt:
+        trend = "微跌"
+    elif "下跌" in txt:
+        trend = "下跌"
 
     mood = None
     m2 = re.search(r"情緒分數：\s*([+-]?\d+)", txt)
@@ -105,9 +106,12 @@ def parse_trend_and_score(result_text: str) -> Tuple[Optional[str], Optional[int
 
     return trend, mood, txt
 
+def place_order(db: firestore.Client, order: Order):
+    db.collection(FIRESTORE_ORDERS_COLLECTION).add(asdict(order))
+
 # ------------------ 決策邏輯 ------------------
 
-def decide_actions(results: Dict[str, Dict], portfolio: Dict[str, Position], cash: float) -> Tuple[List[Order], float]:
+def decide_actions(results: Dict[str, Dict], cash: float) -> Tuple[List[Order], float]:
     orders = []
     estimated_cash = cash
 
@@ -116,101 +120,64 @@ def decide_actions(results: Dict[str, Dict], portfolio: Dict[str, Position], cas
         if not res:
             continue
 
-        doc = res
-        result_text = doc.get('result') or doc.get('analysis') or ''
-        trend, mood, raw = parse_trend_and_score(result_text)
-        ticker = target
+        text = res.get("result") or res.get("analysis") or ""
+        trend, mood, _ = parse_trend_and_score(text)
 
-        current_price = get_twse_price(stock_no)
-        if current_price <= 0:
-            print(f"[warning] {ticker} 無法抓到即時價格，略過")
+        price = get_twse_price(stock_no)
+        if price <= 0:
             continue
 
-        if trend in ['上漲', '微漲']:
-            amt = min(MAX_PER_TRADE, estimated_cash) if trend == '上漲' else min(30_000, estimated_cash, MAX_PER_TRADE)
+        if trend in ["上漲", "微漲"]:
+            amt = min(MAX_PER_TRADE, estimated_cash)
             if amt >= 1000:
-                shares = round(amt / current_price, 4)
-                actual_amt = shares * current_price
+                shares = round(amt / price, 4)
+                real_amt = shares * price
+                estimated_cash -= real_amt
+
                 orders.append(Order(
                     timestamp=datetime.now(timezone.utc).isoformat(),
-                    ticker=ticker,
-                    side='BUY',
-                    amount=actual_amt,
+                    ticker=target,
+                    side="BUY",
+                    amount=real_amt,
                     shares=shares,
-                    exec_price=current_price,
-                    status='PENDING',
-                    reason=f"trend={trend}, mood={mood}",
+                    exec_price=price,
+                    status="PENDING",
+                    reason=f"trend={trend}, mood={mood}"
                 ))
-                estimated_cash -= actual_amt
-
-        elif trend in ['微跌', '下跌']:
-            pos = portfolio.get(ticker)
-            if pos and pos.shares > 0:
-                sell_ratio = 0.3 if trend == '微跌' else 0.6
-                if pos.avg_price:
-                    approx_proceeds = pos.avg_price * pos.shares * sell_ratio
-                    amt = min(approx_proceeds, MAX_PER_TRADE)
-                else:
-                    amt = MAX_PER_TRADE
-                if amt >= 1000:
-                    orders.append(Order(
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        ticker=ticker,
-                        side='SELL',
-                        amount=amt,
-                        shares=None,
-                        exec_price=None,
-                        status='PENDING',
-                        reason=f"trend={trend}, mood={mood}",
-                    ))
 
     return orders, estimated_cash
 
-# ------------------ 主流程 ------------------
+# ------------------ 輸出檔案 ------------------
+
+def write_report_to_folders(text: str):
+    now = datetime.now()
+    ts = now.strftime("%Y%m%d_%H.%M.%S")
+    filename = f"{ts}.txt"
+
+    # 本地 results
+    local_folder = "results"
+    os.makedirs(local_folder, exist_ok=True)
+    local_path = os.path.join(local_folder, filename)
+
+    # GitHub 專案資料夾
+    os.makedirs(GITHUB_RESULTS_FOLDER, exist_ok=True)
+    github_path = os.path.join(GITHUB_RESULTS_FOLDER, filename)
+
+    # 寫檔
+    with open(local_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    with open(github_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    print(f"✅ 已輸出本地：{local_path}")
+    print(f"✅ 已輸出 GitHub 資料夾：{github_path}")
+
+# ------------------ 主程式 ------------------
 
 def main():
-    import os
-    from datetime import datetime
-
-    # --- 結果寫檔 ---
-    def write_result_file(text: str):
-        folder = "results"
-        if not os.path.exists(folder):
-            os.makedirs(folder, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H.%M")
-        filename = f"{folder}/{ts}.txt"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"已輸出報告：{filename}")
-
-    def build_daily_text(results, orders, est_cash):
-        lines = []
-        lines.append("================ 今日預測與投資狀況 ===============")
-        for coll, (target, _) in RESULT_COLLECTIONS.items():
-            r = results.get(coll)
-            if not r:
-                lines.append(f"今日 {target} 股：無資料")
-                continue
-            trend, mood, _ = parse_trend_and_score(r.get('result') or r.get('analysis') or '')
-            trend_text = trend if trend else "無趨勢"
-            lines.append(f"今日 {target} 股 預測為：{trend_text}")
-        lines.append(f"\n本金剩餘：{est_cash:.0f} 元")
-        if not orders:
-            lines.append("本日有無投資：無")
-            lines.append("原因：無符合條件之買賣訊號")
-        else:
-            lines.append("本日有無投資：有")
-            lines.append("\n本日投資：")
-            for o in orders:
-                lines.append(f"- {o.side} {o.ticker} 金額 {o.amount:.0f} 股數 {o.shares:.4f} 成交價 {o.exec_price} (原因：{o.reason})")
-        lines.append("\n停損點：avg_price × 0.9 (可自訂)")
-        lines.append("====================================================")
-        return "\n".join(lines)
-
     db = get_db()
 
-    # 測試模式：固定初始本金
-    portfolio = {}
     cash = INITIAL_CAPITAL
 
     results = {}
@@ -219,24 +186,31 @@ def main():
         if doc:
             results[coll] = doc
 
-    orders, est_cash = decide_actions(results, portfolio, cash)
+    orders, est_cash = decide_actions(results, cash)
+
+    for o in orders:
+        place_order(db, o)
+
+    # 建立報告文字
+    lines = []
+    lines.append("==== 今日交易模擬報告 ====")
+    lines.append(f"初始本金：{INITIAL_CAPITAL:,}")
+    lines.append(f"剩餘現金：{est_cash:,.0f}")
+    lines.append("")
 
     if orders:
-        print(f"擬下單 {len(orders)} 筆，預估剩餘現金：{est_cash:.2f} 元")
+        lines.append("交易紀錄：")
         for o in orders:
-            place_order(db, o)
-            print(f"寫入 order: {o.side} {o.ticker} 金額 {o.amount:.0f} 股數 {o.shares:.4f} 成交價 {o.exec_price}")
+            lines.append(f"{o.side} {o.ticker} 金額={o.amount:.0f} 股數={o.shares} 價格={o.exec_price}")
     else:
-        print("沒有符合條件的下單決策。")
+        lines.append("今日無交易")
 
-    # 存 portfolio
-    save_portfolio(db, portfolio, est_cash)
+    report_text = "\n".join(lines)
 
-    # 寫報告
-    report = build_daily_text(results, orders, est_cash)
-    write_result_file(report)
+    # 輸出到本地 + GitHub 資料夾
+    write_report_to_folders(report_text)
 
-    print("Done. Orders 已寫入 Firestore。")
+    print("✅ 執行完成")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
