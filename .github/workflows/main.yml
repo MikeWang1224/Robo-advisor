@@ -18,8 +18,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,15 +27,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Decode GCP credentials
+      - name: Decode Firebase key
         run: |
-          echo "${{ secrets.GCP_KEY_B64 }}" | base64 --decode > gcp-key.json
-          test -s gcp-key.json || (echo "❌ gcp-key.json is empty" && exit 1)
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-key.json" >> $GITHUB_ENV
+          echo "${{ secrets.GCP_KEY_B64 }}" | base64 --decode > firebase_key.json
+          test -s firebase_key.json || (echo "❌ firebase_key.json is empty" && exit 1)
+        env:
+          GCP_KEY_B64: ${{ secrets.GCP_KEY_B64 }}
 
       - name: Run robo.py and save result
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/firebase_key.json
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
