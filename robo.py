@@ -270,6 +270,80 @@ def decide_actions(results: Dict[str, Dict], portfolio: Dict[str, Position], cas
 # ------------------ 主流程 ------------------
 
 def main():
+    import os
+    from datetime import datetime
+
+    # --- 新增：結果輸出到 result/*.txt ---
+    def write_result_file(text: str):
+        os.makedirs("result", exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"result/{ts}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"已輸出報告：{filename}")
+
+    # --- 新增：將輸出內容整合成文字 ---
+    def build_daily_text(results, orders, est_cash):
+        lines = []
+        lines.append("================ 今日預測與投資狀況 ===============")
+        for coll, target in RESULT_COLLECTIONS.items():
+            r = results.get(coll)
+            if not r:
+                lines.append(f"今日 {target} 股：無資料")
+                continue
+            trend, mood, _ = parse_trend_and_score(r.get('result') or r.get('analysis') or '')
+            trend_text = trend if trend else "無趨勢"
+            lines.append(f"今日 {target} 股 預測為：{trend_text}")
+
+        lines.append(f"
+本金剩餘：{est_cash:.0f} 元")
+
+        if not orders:
+            lines.append("本日有無投資：無")
+            lines.append("原因：無符合條件之買賣訊號")
+        else:
+            lines.append("本日有無投資：有")
+            lines.append("
+本日投資：")
+            for o in orders:
+                lines.append(f"- {o.side} {o.ticker} 金額 {o.amount:.0f} (原因：{o.reason})")
+
+        lines.append("
+停損點：avg_price × 0.9 (可自訂)")
+        lines.append("====================================================")
+        return "
+".join(lines)
+
+    # --- 新增：決策輸出格式 ---
+    def print_daily_report(results, orders, est_cash):
+        print("================ 今日預測與投資狀況 ===============")
+        for coll, target in RESULT_COLLECTIONS.items():
+            r = results.get(coll)
+            if not r:
+                print(f"今日 {target} 股：無資料")
+                continue
+            trend, mood, _ = parse_trend_and_score(r.get('result') or r.get('analysis') or '')
+            trend_text = trend if trend else "無趨勢"
+            print(f"今日 {target} 股 預測為：{trend_text}")
+
+        print(f"
+本金剩餘：{est_cash:.0f} 元")
+
+        if not orders:
+            print("本日有無投資：無")
+            print("原因：無符合條件之買賣訊號")
+        else:
+            print("本日有無投資：有")
+            print("
+本日投資：")
+            for o in orders:
+                print(f"- {o.side} {o.ticker} 金額 {o.amount:.0f} (原因：{o.reason})")
+
+        print("
+停損點：可根據 avg_price * 0.9（自訂）")
+        print("====================================================
+")
+
     db = get_db()
 
     # 讀取現有 portfolio（若無則初始化）
