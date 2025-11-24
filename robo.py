@@ -227,13 +227,20 @@ def main():
     from datetime import datetime
 
     # --- 結果寫檔 ---
+      # --- 結果寫檔（修正版） ---
     def write_result_file(text: str):
-        os.makedirs("result", exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"result/{ts}.txt"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"已輸出報告：{filename}")
+      folder = "results"
+      if not os.path.exists(folder):
+          os.makedirs(folder, exist_ok=True)
+
+      ts = datetime.now().strftime("%Y%m%d_%H%M")
+      filename = f"{folder}/{ts}.txt"
+
+      with open(filename, "w", encoding="utf-8") as f:
+        f.write(text)
+
+      print(f"已輸出報告：{filename}")
+
 
     # --- 將資訊組合為字串 ---
     def build_daily_text(results, orders, est_cash):
