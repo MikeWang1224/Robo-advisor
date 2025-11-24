@@ -105,43 +105,6 @@ def parse_trend_and_score(result_text: str) -> Tuple[Optional[str], Optional[int
 
     return trend, mood, txt
 
-def load_portfolio(db: firestore.Client) -> Dict[str, Position]:
-    portfolio = {}
-    try:
-        doc = db.collection(FIRESTORE_PORTFOLIO_COLLECTION).document("account").get()
-        if doc.exists:
-            data = doc.to_dict() or {}
-            inv = data.get('investments', {})
-            for t, v in inv.items():
-                portfolio[t] = Position(
-                    ticker=t,
-                    shares=float(v.get('shares', 0.0)),
-                    avg_price=v.get('avg_price'),
-                    cost=float(v.get('cost', 0.0))
-                )
-            return portfolio
-    except Exception as e:
-        print(f"[warning] 載入 portfolio 失敗：{e}")
-    return portfolio
-
-def save_portfolio(db: firestore.Client, portfolio: Dict[str, Position], cash: float):
-    inv = {}
-    for t, p in portfolio.items():
-        inv[t] = {
-            'shares': p.shares,
-            'avg_price': p.avg_price,
-            'cost': p.cost,
-        }
-    payload = {
-        'cash': cash,
-        'investments': inv,
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-    }
-    db.collection(FIRESTORE_PORTFOLIO_COLLECTION).document('account').set(payload)
-
-def place_order(db: firestore.Client, order: Order):
-    db.collection(FIRESTORE_ORDERS_COLLECTION).add(asdict(order))
-
 # ------------------ 決策邏輯 ------------------
 
 def decide_actions(results: Dict[str, Dict], portfolio: Dict[str, Position], cash: float) -> Tuple[List[Order], float]:
@@ -266,8 +229,10 @@ def main():
     else:
         print("沒有符合條件的下單決策。")
 
+    # 存 portfolio
     save_portfolio(db, portfolio, est_cash)
 
+    # 寫報告
     report = build_daily_text(results, orders, est_cash)
     write_result_file(report)
 
