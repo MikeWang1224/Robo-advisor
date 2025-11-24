@@ -1,3 +1,4 @@
-✅ 已輸出本地：results/20251124_08.13.23.txt
-✅ 已輸出 GitHub 資料夾：./github_results/20251124_08.13.23.txt
+[error] TWSE 抓價失敗：HTTPSConnectionPool(host='mis.twse.com.tw', port=443): Max retries exceeded with url: /stock/api/getStockInfo.jsp?ex_ch=tse_2317.tw (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x7f1ffcd33090>, 'Connection to mis.twse.com.tw timed out. (connect timeout=5)'))
+✅ 已輸出本地：results/20251124_08.18.16.txt
+✅ 已輸出 GitHub 資料夾：./github_results/20251124_08.18.16.txt
 ✅ 執行完成
