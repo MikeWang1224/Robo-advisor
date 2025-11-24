@@ -5,6 +5,7 @@ import time
 import json
 import requests
 from datetime import datetime
+import base64
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -17,7 +18,15 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(GITHUB_RESULTS_DIR, exist_ok=True)
 
 # ===================== Firebase =====================
-cred = credentials.Certificate("firebase_key.json")  # ←改成你的 key
+# 如果你在 GitHub Actions 上用 GCP_KEY_B64 Secret
+GCP_KEY_B64 = os.environ.get("GCP_KEY_B64")
+if GCP_KEY_B64:
+    # 先解碼 Base64 成 firebase_key.json
+    with open("firebase_key.json", "wb") as f:
+        f.write(base64.b64decode(GCP_KEY_B64))
+
+# 初始化 Firebase
+cred = credentials.Certificate("firebase_key.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -225,7 +234,6 @@ def main():
     with open(local_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    # ✅ GitHub 也輸出完整交易明細
     with open(github_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
