@@ -5,13 +5,13 @@ on:
     branches:
       - main
   schedule:
-    - cron: '30 15 * * *'  # 每天台灣時間晚上11:30執行
-  workflow_dispatch:      # 支援手動觸發
- 
+    - cron: '30 15 * * *'
+  workflow_dispatch:
+
 permissions:
-  contents: write   # 🔥 這行很關鍵，允許 push 回 repo
- 
-jobs: 
+  contents: write
+
+jobs:
   run_program:
     runs-on: ubuntu-latest
 
@@ -19,7 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true   # ✅ 允許後續 git push 使用 GITHUB_TOKEN
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,9 +29,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Set Google credentials
+      - name: Decode GCP credentials
         run: |
-          echo "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_B64 }}" | base64 -d > $GITHUB_WORKSPACE/gcp-key.json
+          echo "${{ secrets.GCP_KEY_B64 }}" | base64 --decode > gcp-key.json
+          test -s gcp-key.json || (echo "❌ gcp-key.json is empty" && exit 1)
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-key.json" >> $GITHUB_ENV
 
       - name: Run robo.py and save result
@@ -41,7 +42,6 @@ jobs:
           mkdir -p results
           today=$(date +'%Y%m%d')
           python robo.py > results/result_${today}.txt
-          cat results/result_${today}.txt
           echo "TODAY=$today" >> $GITHUB_ENV
 
       - name: Commit and push result back to repo
