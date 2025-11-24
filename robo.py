@@ -1,7 +1,7 @@
 # trading_bot_from_groq_results.py
 # -*- coding: utf-8 -*-
 """
-簡易投資機器人（基於你存在 Firestore 的 Groq_result 結果）
+簡易投資機器人（基於你存在 Firestore 的 Groq_result 結果 + 即時股價）
 目的：
   - 從 Groq_result / Groq_result_Foxxcon / Groq_result_UMC 讀取最新分析結果
   - 根據分析結果決定今日（或隔日開盤）買賣
@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass, asdict
 
+import requests
 from google.cloud import firestore
 
 # ------------------ 設定 ------------------
@@ -25,9 +26,9 @@ FIRESTORE_PORTFOLIO_COLLECTION = "Trading_Portfolio"
 FIRESTORE_ORDERS_COLLECTION = "Trading_Orders"
 
 RESULT_COLLECTIONS = {
-    "Groq_result": "台積電",
-    "Groq_result_Foxxcon": "鴻海",
-    "Groq_result_UMC": "聯電",
+    "Groq_result": ("台積電", "2330"),
+    "Groq_result_Foxxcon": ("鴻海", "2317"),
+    "Groq_result_UMC": ("聯電", "2303"),
 }
 
 # ------------------ Dataclasses ------------------
@@ -53,6 +54,24 @@ class Order:
 
 def get_db():
     return firestore.Client()
+
+def get_twse_price(stock_no: str) -> float:
+    """
+    抓台灣上市股票即時成交價
+    stock_no: 股票代號，例如 '2330'
+    """
+    url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{stock_no}.tw"
+    try:
+        r = requests.get(url)
+        data = r.json()
+        msg = data.get("msgArray", [])
+        if msg and "z" in msg[0]:
+            price_str = msg[0]["z"]
+            if price_str != "--":
+                return float(price_str)
+    except Exception as e:
+        print(f"[error] TWSE 抓價失敗：{e}")
+    return 0.0
 
 def read_latest_result(db: firestore.Client, collection_name: str) -> Optional[Dict]:
     try:
@@ -156,7 +175,7 @@ def decide_actions(results: Dict[str, Dict], portfolio: Dict[str, Position], cas
     orders = []
     estimated_cash = cash
 
-    for coll, target in RESULT_COLLECTIONS.items():
+    for coll, (target, stock_no) in RESULT_COLLECTIONS.items():
         res = results.get(coll)
         if not res:
             continue
@@ -166,31 +185,27 @@ def decide_actions(results: Dict[str, Dict], portfolio: Dict[str, Position], cas
         trend, mood, raw = parse_trend_and_score(result_text)
         ticker = target
 
-        if trend == '上漲':
-            amt = min(MAX_PER_TRADE, estimated_cash)
-            if amt >= 1000:
-                orders.append(Order(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    ticker=ticker,
-                    side='BUY',
-                    amount=amt,
-                    shares=None,
-                    exec_price=None,
-                    status='PENDING',
-                    reason=f"trend={trend}, mood={mood}",
-                ))
-                estimated_cash -= amt
+        # 抓即時股價
+        current_price = get_twse_price(stock_no)
+        if current_price <= 0:
+            print(f"[warning] {ticker} 無法抓到即時價格，略過")
+            continue
 
-        elif trend == '微漲':
-            amt = min(30_000, estimated_cash, MAX_PER_TRADE)
+        if trend in ['上漲', '微漲']:
+            if trend == '上漲':
+                amt = min(MAX_PER_TRADE, estimated_cash)
+            else:  # 微漲
+                amt = min(30_000, estimated_cash, MAX_PER_TRADE)
+
             if amt >= 1000:
+                shares = amt / current_price
                 orders.append(Order(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     ticker=ticker,
                     side='BUY',
                     amount=amt,
-                    shares=None,
-                    exec_price=None,
+                    shares=shares,
+                    exec_price=current_price,
                     status='PENDING',
                     reason=f"trend={trend}, mood={mood}",
                 ))
@@ -227,27 +242,25 @@ def main():
     from datetime import datetime
 
     # --- 結果寫檔 ---
-      # --- 結果寫檔（修正版） ---
     def write_result_file(text: str):
-      folder = "results"
-      if not os.path.exists(folder):
-          os.makedirs(folder, exist_ok=True)
+        folder = "results"
+        if not os.path.exists(folder):
+            os.makedirs(folder, exist_ok=True)
 
-      ts = datetime.now().strftime("%Y%m%d_%H%M")
-      filename = f"{folder}/{ts}.txt"
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"{folder}/{ts}.txt"
 
-      with open(filename, "w", encoding="utf-8") as f:
-        f.write(text)
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(text)
 
-      print(f"已輸出報告：{filename}")
-
+        print(f"已輸出報告：{filename}")
 
     # --- 將資訊組合為字串 ---
     def build_daily_text(results, orders, est_cash):
         lines = []
         lines.append("================ 今日預測與投資狀況 ===============")
 
-        for coll, target in RESULT_COLLECTIONS.items():
+        for coll, (target, _) in RESULT_COLLECTIONS.items():
             r = results.get(coll)
             if not r:
                 lines.append(f"今日 {target} 股：無資料")
@@ -265,7 +278,7 @@ def main():
             lines.append("本日有無投資：有")
             lines.append("\n本日投資：")
             for o in orders:
-                lines.append(f"- {o.side} {o.ticker} 金額 {o.amount:.0f} (原因：{o.reason})")
+                lines.append(f"- {o.side} {o.ticker} 金額 {o.amount:.0f} 股數 {o.shares:.4f} 成交價 {o.exec_price} (原因：{o.reason})")
 
         lines.append("\n停損點：avg_price × 0.9 (可自訂)")
         lines.append("====================================================")
@@ -300,7 +313,7 @@ def main():
         print(f"擬下單 {len(orders)} 筆，預估剩餘現金：{est_cash:.2f} 元")
         for o in orders:
             place_order(db, o)
-            print(f"寫入 order: {o.side} {o.ticker} 金額 {o.amount:.0f}")
+            print(f"寫入 order: {o.side} {o.ticker} 金額 {o.amount:.0f} 股數 {o.shares:.4f} 成交價 {o.exec_price}")
     else:
         print("沒有符合條件的下單決策。")
 
