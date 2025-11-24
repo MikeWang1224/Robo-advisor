@@ -1,0 +1,4 @@
+擬下單 1 筆，預估剩餘現金：940000.00 元
+寫入 order: BUY 聯電 金額 30000
+已輸出報告：results/20251124_0732.txt
+Done. Orders 已寫入 Firestore。
