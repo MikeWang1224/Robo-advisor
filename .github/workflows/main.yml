@@ -34,7 +34,7 @@ jobs:
           echo "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_B64 }}" | base64 -d > $GITHUB_WORKSPACE/gcp-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/gcp-key.json" >> $GITHUB_ENV
 
-      - name: Run RAG_Test.py and save result
+      - name: Run robo.py and save result
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
