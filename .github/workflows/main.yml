@@ -29,7 +29,7 @@ jobs:
 
       - name: Decode Firebase key
         run: |
-          echo "${{ secrets.GCP_KEY_B64 }}" | base64 --decode > firebase_key.json
+          echo "${{ secrets.NEW_FIREBASE_KEY}}" | base64 --decode > firebase_key.json
           test -s firebase_key.json || (echo "❌ firebase_key.json is empty" && exit 1)
         env:
           GCP_KEY_B64: ${{ secrets.GCP_KEY_B64 }}
