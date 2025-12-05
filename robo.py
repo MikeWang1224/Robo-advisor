@@ -18,12 +18,12 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(GITHUB_RESULTS_DIR, exist_ok=True)
 
 # ===================== Firebase =====================
-# 如果你在 GitHub Actions 上用 GCP_KEY_B64 Secret
-GCP_KEY_B64 = os.environ.get("GCP_KEY_B64")
-if GCP_KEY_B64:
+# 如果你在 GitHub Actions 上用 NEW_FIREBASE_KEY Secret
+NEW_FIREBASE_KEY = os.environ.get("NEW_FIREBASE_KEY")
+if NEW_FIREBASE_KEY:
     # 先解碼 Base64 成 firebase_key.json
     with open("firebase_key.json", "wb") as f:
-        f.write(base64.b64decode(GCP_KEY_B64))
+        f.write(base64.b64decode(NEW_FIREBASE_KEY))
 
 # 初始化 Firebase
 cred = credentials.Certificate("firebase_key.json")
