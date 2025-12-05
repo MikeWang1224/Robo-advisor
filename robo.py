@@ -1,246 +1,357 @@
 # -*- coding: utf-8 -*-
+"""
+股票新聞分析工具（單公司 RAG 版：光寶科 2301）
+完全可跑版（短期預測特化） - Context-aware + 背離 偵測
+⬆️ 修正：今天新聞 100% 會被抓到
+⬆️ 新增：標題命中但內文沒命中 → 直接排除
+"""   
 
-import os
-import time
-import json
-import requests
-from datetime import datetime
-import base64
-import firebase_admin
-from firebase_admin import credentials, firestore
+import os, signal, regex as re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import List, Tuple
+from google.cloud import firestore
+from dotenv import load_dotenv
+from groq import Groq
 
-# ===================== 基本設定 =====================
-INITIAL_CAPITAL = 1000000
-RESULTS_DIR = "results"
-GITHUB_RESULTS_DIR = "./github_results"
+# ---------- 設定 ----------
+SILENT_MODE = True
+TAIWAN_TZ = timezone(timedelta(hours=8))
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(GITHUB_RESULTS_DIR, exist_ok=True)
+TOKENS_COLLECTION = "bull_tokens"
+NEWS_COLLECTION_LITE = "NEWS_LITE"           # 光寶科新聞 collection
+RESULT_COLLECTION_LITE = "Groq_result_LITE" # 光寶科分析結果
 
-# ===================== Firebase =====================
-# 如果你在 GitHub Actions 上用 NEW_FIREBASE_KEY Secret
-NEW_FIREBASE_KEY = os.environ.get("NEW_FIREBASE_KEY")
-if NEW_FIREBASE_KEY:
-    # 先解碼 Base64 成 firebase_key.json
-    with open("firebase_key.json", "wb") as f:
-        f.write(base64.b64decode(NEW_FIREBASE_KEY))
+SENSITIVE_WORDS = {
+    "法說": 1.5, "財報": 1.4, "新品": 1.3, "合作": 1.3,
+    "併購": 1.4, "投資": 1.3, "停工": 1.6, "下修": 1.5,
+    "利空": 1.5, "爆料": 1.4, "營收": 1.3, "展望": 1.2,
+}
 
-# 初始化 Firebase
-cred = credentials.Certificate("firebase_key.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+STOP = False
+def _sigint_handler(signum, frame):
+    global STOP
+    STOP = True
+    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
+signal.signal(signal.SIGINT, _sigint_handler)
 
-# ===================== 抓 TWSE 股價（穩定版） =====================
-def get_tw_price(stock_id):
-    urls = [
-        f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{stock_id}.tw",
-        f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_{stock_id}.tw"
-    ]
+if os.path.exists(".env"):
+    load_dotenv(".env", override=True)
+client = Groq(api_key=os.getenv("NEW_FIREBASE_KEY"))
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+# ---------- 結構 ----------
+@dataclass
+class Token:
+    polarity: str
+    ttype: str
+    pattern: str
+    weight: float
+    note: str
 
-    for url in urls:
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            data = r.json()
+@dataclass
+class MatchResult:
+    score: float
+    hits: List[Tuple[str, float, str]]
 
-            if "msgArray" in data and len(data["msgArray"]) > 0:
-                price = float(data["msgArray"][0]["z"])
-                return price
-        except:
-            continue
+# ---------- 工具 ----------
+def get_db():
+    return firestore.Client()
 
-    print(f"[⚠️] TWSE 抓價失敗：{stock_id}")
-    return None
+def normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
-# ===================== 讀 Firestore 資料 =====================
-def load_groq_signals():
-    col = db.collection("Groq_Results")
-    docs = col.stream()
-    signals = []
+def first_n_sentences(text: str, n: int = 3) -> str:
+    if not text:
+        return ""
+    parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
+    return "".join(parts[:n]) + ("..." if len(parts) > n else "")
 
-    for d in docs:
-        data = d.to_dict()
-        signals.append(data)
+def parse_docid_time(doc_id: str):
+    m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
+    if not m:
+        return datetime.now(TAIWAN_TZ)
 
-    return signals
+    ymd, hms = m.group("ymd"), m.group("hms") or "000000"
+    try:
+        return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
+    except:
+        return datetime.now(TAIWAN_TZ)
 
-# ===================== 讀取帳戶狀態 =====================
-def load_account():
-    doc = db.collection("Trading_Account").document("ACCOUNT").get()
-    if doc.exists:
-        return doc.to_dict()["cash"]
-    else:
-        db.collection("Trading_Account").document("ACCOUNT").set({
-            "cash": INITIAL_CAPITAL
-        })
-        return INITIAL_CAPITAL
+def parse_price_change(val):
+    if not isinstance(val, str) or not val.strip():
+        return 0.0
+    m = re.search(r"\((-?\d*\.?\d+)%\)", val)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"([-+]?\d*\.?\d+)%", val)
+    if m:
+        return float(m.group(1))
+    return 0.0
 
-def save_account(cash):
-    db.collection("Trading_Account").document("ACCOUNT").update({
-        "cash": cash
-    })
+# ---------- Token ----------
+def load_tokens(db):
+    pos, neg = [], []
+    for d in db.collection(TOKENS_COLLECTION).stream():
+        data = d.to_dict() or {}
+        pol = data.get("polarity", "").lower()
+        ttype = data.get("type", "substr").lower()
+        patt = data.get("pattern", "")
+        note = data.get("note", "")
+        w = float(data.get("weight", 1.0))
+        if pol == "positive": pos.append(Token(pol, ttype, patt, w, note))
+        elif pol == "negative": neg.append(Token(pol, ttype, patt, -abs(w), note))
+    return pos, neg
 
-# ===================== 持倉相關 =====================
-def load_portfolio(stock_id):
-    doc = db.collection("Trading_Portfolio").document(stock_id).get()
-    if doc.exists:
-        return doc.to_dict()
-    return None
-
-def save_portfolio(stock_id, shares, avg_price):
-    db.collection("Trading_Portfolio").document(stock_id).set({
-        "shares": shares,
-        "avg_price": avg_price,
-        "update_time": datetime.now()
-    })
-
-def delete_portfolio(stock_id):
-    db.collection("Trading_Portfolio").document(stock_id).delete()
-
-# ===================== 訂單紀錄 =====================
-def record_order(data):
-    db.collection("Trading_Orders").add(data)
-
-# ===================== 下單物件 =====================
-class Order:
-    def __init__(self, ticker, price, shares):
-        self.ticker = ticker
-        self.exec_price = price
-        self.shares = shares
-        self.amount = price * shares
-
-# ===================== 主程式 =====================
-def main():
-    cash = load_account()
-    signals = load_groq_signals()
-    orders = []
-    sell_orders = []
-
-    lines = []
-    lines.append("==== 交易機器人報表 ====")
-    lines.append(f"時間：{datetime.now()}")
-    lines.append(f"初始現金：{cash:,.0f} 元")
-    lines.append("")
-
-    # ======== 先檢查持倉是否需要停利/停損 ========
-    port_docs = db.collection("Trading_Portfolio").stream()
-    for p in port_docs:
-        p_data = p.to_dict()
-        stock_id = p.id
-        cur_price = get_tw_price(stock_id)
-
-        if not cur_price:
-            continue
-
-        avg = p_data["avg_price"]
-        shares = p_data["shares"]
-
-        profit_ratio = (cur_price - avg) / avg
-
-        if profit_ratio >= 0.08:  # 停利 8%
-            sell_orders.append((stock_id, cur_price, shares, "停利"))
-        elif profit_ratio <= -0.05:  # 停損 -5%
-            sell_orders.append((stock_id, cur_price, shares, "停損"))
-
-    # ======== 執行賣出 ========
-    for s in sell_orders:
-        stock_id, price, shares, reason = s
-        amount = price * shares
-        cash += amount
-
-        delete_portfolio(stock_id)
-
-        record_order({
-            "type": "SELL",
-            "ticker": stock_id,
-            "price": price,
-            "shares": shares,
-            "amount": amount,
-            "reason": reason,
-            "time": datetime.now()
-        })
-
-        lines.append(f"【賣出】{stock_id}")
-        lines.append(f"  原因：{reason}")
-        lines.append(f"  價格：{price}")
-        lines.append(f"  股數：{shares}")
-        lines.append(f"  金額：{amount:,.0f}")
-        lines.append("")
-
-    # ======== 買入策略 ========
-    for s in signals:
-        if s.get("prediction") not in ["上漲", "微漲"]:
-            continue
-
-        stock_id = s.get("stock_id")
-        price = get_tw_price(stock_id)
-
-        if not price:
-            lines.append(f"[跳過] {stock_id} 無法取得股價")
-            continue
-
-        budget = cash * 0.05
-        shares = budget / price
-
-        if shares <= 0:
-            continue
-
-        order = Order(stock_id, price, shares)
-        orders.append(order)
-
-        cash -= order.amount
-
-        # 更新持倉
-        hold = load_portfolio(stock_id)
-        if hold:
-            total_shares = hold["shares"] + shares
-            new_avg = ((hold["shares"] * hold["avg_price"]) + order.amount) / total_shares
-            save_portfolio(stock_id, total_shares, new_avg)
+def compile_tokens(tokens: List[Token]):
+    compiled = []
+    for t in tokens:
+        if t.ttype == "regex":
+            try:
+                compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
+            except:
+                continue
         else:
-            save_portfolio(stock_id, shares, price)
+            compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
+    return compiled
 
-        record_order({
-            "type": "BUY",
-            "ticker": stock_id,
-            "price": price,
-            "shares": shares,
-            "amount": order.amount,
-            "time": datetime.now()
-        })
+# ---------- Scoring ----------
+def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
+    norm = normalize(text)
+    score, hits, seen = 0.0, [], set()
 
-    # ======== 輸出買入紀錄 ========
-    if orders:
-        lines.append("【買入明細】")
-        for o in orders:
-            lines.append(f"股票：{o.ticker}")
-            lines.append(f"  成交價：{o.exec_price}")
-            lines.append(f"  股數：{o.shares:.2f}")
-            lines.append(f"  總金額：{o.amount:,.0f}")
-            lines.append("")
+    # 只保留光寶科的別名
+    aliases = {
+        "光寶科": ["光寶科", "liteon", "2301"],
+    }
+
+    company_keywords = aliases.get(target, [])
+    if not any(a.lower() in norm for a in company_keywords):
+        return MatchResult(0.0, [])
+
+    for ttype, cre, w, note, patt in pos_c + neg_c:
+        key = (patt, note)
+        if key in seen:
+            continue
+        matched = cre.search(norm) if ttype == "regex" else patt in norm
+        if matched:
+            score += w
+            hits.append((patt, w, note))
+            seen.add(key)
+
+    return MatchResult(score, hits)
+
+def adjust_score_for_context(text: str, base_score: float) -> float:
+    if not text or base_score == 0:
+        return base_score
+    norm = text.lower()
+
+    neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
+    if any(p in norm for p in neutral_phrases):
+        base_score *= 0.4
+
+    positive_boost = ["創新高", "倍增", "大幅成長", "獲利暴增", "報喜"]
+    negative_boost = ["暴跌", "下滑", "虧損", "停工", "下修", "裁員", "警訊"]
+
+    if any(p in norm for p in positive_boost): base_score *= 1.3
+    if any(p in norm for p in negative_boost): base_score *= 1.3
+
+    return base_score
+
+# ---------- 背離偵測 ----------
+def detect_divergence(avg_score: float, top_news):
+    key_news = top_news[:5]
+    price_moves = []
+    strength = []
+
+    for _, _, _, res, weight, price_change in key_news:
+        pc = price_change if price_change is not None else 0.0
+        price_moves.append(pc * weight)
+        strength.append(abs(res.score * weight))
+
+    if not price_moves:
+        return "無足夠資料判斷背離。"
+
+    avg_strength = sum(strength) / len(strength)
+    if avg_strength < 0.4:
+        return "新聞力道偏弱，無明顯背離。"
+
+    avg_price_move = sum(price_moves) / len(price_moves)
+
+    STRONG = 0.7
+    MEDIUM = 0.35
+
+    if avg_score > STRONG and avg_price_move < -0.2:
+        return "新聞偏強多，但股價顯著下跌，屬正向背離（可能短線反彈）。"
+
+    if avg_score > MEDIUM and avg_price_move < -0.5:
+        return "新聞多方略強，股價卻走弱，可能正向背離。"
+
+    if avg_score < -STRONG and avg_price_move > 0.2:
+        return "新聞偏強空，但股價顯著上漲，屬負向背離（可能短線回檔）。"
+
+    if avg_score < -MEDIUM and avg_price_move > 0.5:
+        return "新聞空方略強，股價卻上漲，可能負向背離。"
+
+    return "股價走勢與新聞情緒一致，無明顯背離。"
+
+# ---------- Groq ----------
+def groq_analyze(news_list, target, avg_score, divergence_note=None):
+    if not news_list:
+        return f"隔日{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
+
+    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
+    divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
+
+    prompt = f"""
+你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
+依情緒分數與內容趨勢，嚴格推論隔日股價方向。
+請只輸出「走勢 + 原因」，不要輸出情緒分數。
+
+請用以下格式：
+隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
+原因：{{一句 55 字內}}
+{divergence_text}
+
+整體平均情緒分數：{avg_score:+.2f}
+新聞摘要（含分數）：
+{combined}
+"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "你是台股量化分析員，需依情緒分數產生明確結論，但輸出不能包含情緒分數。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.15,
+            max_tokens=220,
+        )
+
+        ans = resp.choices[0].message.content.strip()
+
+        ans = re.sub(r"情緒分數[:：]\s*-?\d+(\.\d+)?", "", ans)
+        ans = re.sub(r"\n{2,}", "\n", ans).strip()
+
+        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
+        trend = m_trend.group(1) if m_trend else "不明確"
+        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
+
+        m_reason = re.search(r"(?:原因|理由)[:：]\s*(.*)", ans)
+        reason = m_reason.group(1).strip() if m_reason else ""
+
+        return f"下個預測{target}股價走勢：{trend} {symbol_map.get(trend, '')}\n原因：{reason}"
+
+    except Exception as e:
+        return f"隔日{target}股價走勢：不明確 ⚖️\n原因：Groq分析失敗({e})"
+
+# ---------- 主分析 ----------
+def analyze_target(db, collection, target, result_field):
+    pos, neg = load_tokens(db)
+    pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
+    today = datetime.now(TAIWAN_TZ).date()
+
+    filtered = []
+    seen_news = set()
+
+    # 光寶科 alias（只保留光寶科）
+    company_alias = {
+        "光寶科": ["光寶科", "liteon", "2301"],
+    }[target]
+
+    for d in db.collection(collection).stream():
+        dt = parse_docid_time(d.id)
+        delta_days = (today - dt.date()).days
+
+        if delta_days < 0:
+            delta_days = 0
+
+        if delta_days > 1:
+            continue
+
+        day_weight = 1.0 if delta_days == 0 else 0.85 if delta_days == 1 else 0.7
+        data = d.to_dict() or {}
+
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+
+            title, content = v.get("title", ""), v.get("content", "")
+
+            # ---------- ⛔ 新增規則：標題命中但內文沒命中 → skip ----------
+            title_hit = any(a in title for a in company_alias)
+            content_hit = any(a in content for a in company_alias)
+            if title_hit and not content_hit:
+                continue
+
+            full_raw = f"{title}|{content}"
+            if full_raw in seen_news:
+                continue
+            seen_news.add(full_raw)
+
+            price_raw = v.get("price_change", "")
+            price_change = parse_price_change(price_raw)
+
+            full = f"{title} {content} 股價變動：{price_raw}"
+
+            res = score_text(full, pos_c, neg_c, target)
+            if not res.hits:
+                continue
+
+            adj_score = adjust_score_for_context(full, res.score)
+            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
+            impact = 1.0 + sum(w * 0.05 for k_sens, w in SENSITIVE_WORDS.items() if k_sens in full)
+            total_weight = day_weight * token_weight * impact
+
+            filtered.append((d.id, k, title, res, total_weight, price_change))
+
+    if not filtered:
+        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
+        summary = groq_analyze([], target, 0)
     else:
-        lines.append("今日無買入交易")
+        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
+        top_news = filtered[:10]
 
-    lines.append("")
-    lines.append(f"剩餘現金：{cash:,.0f} 元")
+        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
+        for docid, key, title, res, weight, price_change in top_news:
+            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
+            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} | 股價變動：{price_change}")
+            for p, w, n in res.hits:
+                print(f"   {'+' if w > 0 else '-'} {p}（{n}）")
 
-    save_account(cash)
+        news_with_scores = [(f"{t} 股價變動：{pc}", res.score * weight) for _, _, t, res, weight, pc in top_news]
+        avg_score = sum(s for _, s in news_with_scores) / len(news_with_scores)
 
-    # ======== 存檔 ========
-    now = datetime.now().strftime("%Y%m%d_%H.%M.%S")
-    local_path = os.path.join(RESULTS_DIR, f"{now}.txt")
-    github_path = os.path.join(GITHUB_RESULTS_DIR, f"result_{datetime.now().strftime('%Y%m%d')}.txt")
+        divergence_note = detect_divergence(avg_score, top_news)
+        summary = groq_analyze(news_with_scores, target, avg_score, divergence_note)
 
-    with open(local_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        fname = f"result_{today.strftime('%Y%m%d')}.txt"
+        with open(fname, "a", encoding="utf-8") as f:
+            f.write(f"======= {target} =======\n")
+            for docid, key, title, res, weight, price_change in top_news:
+                hits_text = "\n".join([f"  {'+' if w > 0 else '-'} {p}（{n}）" for p, w, n in res.hits])
+                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價變動：{price_change}\n命中：\n{hits_text}\n\n")
+            f.write(f"★ 背離判斷：{divergence_note}\n")
+            f.write(f"下個預測股價走勢：{summary}\n\n")
 
-    with open(github_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        print(summary + "\n")
 
-    print(f"✅ 已輸出本地：{local_path}")
-    print(f"✅ 已輸出 GitHub 資料夾：{github_path}")
-    print("✅ 執行完成")
+    # Firestore 寫回
+    try:
+        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
+            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
+            "result": summary,
+        })
+    except Exception as e:
+        print(f"[warning] Firestore 寫回失敗：{e}")
 
-# =====================
+# ---------- 主程式 ----------
+def main():
+    if not SILENT_MODE:
+        print("🚀 開始分析：光寶科（2301）...\n")
+
+    db = get_db()
+    analyze_target(db, NEWS_COLLECTION_LITE, "光寶科", RESULT_COLLECTION_LITE)
+
 if __name__ == "__main__":
     main()
