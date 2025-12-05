@@ -1,0 +1,6 @@
+[⚠️] TWSE 抓價失敗：account
+[⚠️] TWSE 抓價失敗：台積電
+[⚠️] TWSE 抓價失敗：聯電
+✅ 已輸出本地：results/20251205_15.34.45.txt
+✅ 已輸出 GitHub 資料夾：./github_results/result_20251205.txt
+✅ 執行完成
