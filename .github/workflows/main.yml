@@ -1,4 +1,4 @@
-name: Run robo Program and Save Result
+name: Run robo and Together Programs
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  run_program:
+  run_programs:
     runs-on: ubuntu-latest
 
     steps:
@@ -27,13 +27,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Decode Firebase key
-        run: |
-          echo "${{ secrets.NEW_FIREBASE_KEY}}" | base64 --decode > firebase_key.json
-          test -s firebase_key.json || (echo "❌ firebase_key.json is empty" && exit 1)
-        env:
-          GCP_KEY_B64: ${{ secrets.GCP_KEY_B64 }}
-
+      # ---------------- Run robo.py ----------------
       - name: Run robo.py and save result
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -41,14 +35,25 @@ jobs:
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
-          python robo.py > results/result_${today}.txt
-          echo "TODAY=$today" >> $GITHUB_ENV
+          python robo.py > results/robo_result_${today}.txt
+          echo "ROBO_TODAY=$today" >> $GITHUB_ENV
 
-      - name: Commit and push result back to repo
+      # ---------------- Run Together.py ----------------
+      - name: Run Together.py and save result
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/firebase_key.json
+        run: |
+          mkdir -p results
+          today=$(date +'%Y%m%d')
+          python Together.py > results/together_result_${today}.txt
+          echo "TOGETHER_TODAY=$today" >> $GITHUB_ENV
+
+      # ---------------- Commit and push results ----------------
+      - name: Commit and push results back to repo
         if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add results/result_${TODAY}.txt
-          git commit -m "Auto: Add result_${TODAY}.txt" || echo "No changes to commit"
+          git add results/*.txt
+          git commit -m "Auto: Add daily results" || echo "No changes to commit"
           git push origin main
