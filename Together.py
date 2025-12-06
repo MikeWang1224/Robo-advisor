@@ -39,7 +39,7 @@ HF_HEADERS = {
 }
 
 # Firestore 初始化
-key_dict = json.loads(os.environ["NEWS"])
+key_dict = json.loads(os.environ["NEW_FIREBASE_KEY"])
 cred = credentials.Certificate(key_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
@@ -74,11 +74,11 @@ def fetch_stock_change(stock_name):
     except:
         return "無資料"
 
-def add_price_change(news_list, stock_name):
+def add_price_change(NEW_FIREBASE_KEY_list, stock_name):
     change = fetch_stock_change(stock_name)
-    for n in news_list:
+    for n in NEW_FIREBASE_KEY_list:
         n["price_change"] = change
-    return news_list
+    return NEW_FIREBASE_KEY_list
 
 # ---------------------- Embedding（Hugging Face） ---------------------- #
 def generate_embedding(text):
@@ -116,17 +116,17 @@ def fetch_article_content(url, source):
     except:
         return "無法取得新聞內容"
 
-# ---------------------- TechNews ---------------------- #
-def fetch_technews(keyword="台積電", limit=30):
-    print(f"\n📡 TechNews：{keyword}")
-    links, news = [], []
-    url = f'https://technews.tw/google-search/?googlekeyword={keyword}'
+# ---------------------- TechNEW_FIREBASE_KEY ---------------------- #
+def fetch_techNEW_FIREBASE_KEY(keyword="台積電", limit=30):
+    print(f"\n📡 TechNEW_FIREBASE_KEY：{keyword}")
+    links, NEW_FIREBASE_KEY = [], []
+    url = f'https://techNEW_FIREBASE_KEY.tw/google-search/?googlekeyword={keyword}'
     try:
         res = requests.get(url, headers=HEADERS)
         soup = BeautifulSoup(res.text, 'html.parser')
         for a in soup.find_all('a', href=True):
             href = a['href']
-            if href.startswith('https://technews.tw/') and '/tag/' not in href:
+            if href.startswith('https://techNEW_FIREBASE_KEY.tw/') and '/tag/' not in href:
                 if href not in links:
                     links.append(href)
         links = links[:limit]
@@ -154,19 +154,19 @@ def fetch_technews(keyword="台積電", limit=30):
                 continue  # 太舊的新聞跳過
 
             # 內容
-            content = fetch_article_content(link, 'technews')
-            news.append({'title': title, 'content': content, 'published_time': published_dt})
+            content = fetch_article_content(link, 'techNEW_FIREBASE_KEY')
+            NEW_FIREBASE_KEY.append({'title': title, 'content': content, 'published_time': published_dt})
             time.sleep(0.5)
         except:
             continue
-    return news
+    return NEW_FIREBASE_KEY
 
 # ---------------------- Yahoo 新聞 ---------------------- #
-def fetch_yahoo_news(keyword="台積電", limit=30):
+def fetch_yahoo_NEW_FIREBASE_KEY(keyword="台積電", limit=30):
     print(f"\n📡 Yahoo：{keyword}")
-    base = "https://tw.news.yahoo.com"
+    base = "https://tw.NEW_FIREBASE_KEY.yahoo.com"
     url = f"{base}/search?p={keyword}&sort=time"
-    news_list, seen = [], set()
+    NEW_FIREBASE_KEY_list, seen = [], set()
 
     try:
         r = requests.get(url, headers=HEADERS)
@@ -174,7 +174,7 @@ def fetch_yahoo_news(keyword="台積電", limit=30):
         links = soup.select('a.js-content-viewer') or soup.select('h3 a')
 
         for a in links:
-            if len(news_list) >= limit:
+            if len(NEW_FIREBASE_KEY_list) >= limit:
                 break
             title = a.get_text(strip=True)
             if not title or title in seen:
@@ -198,19 +198,19 @@ def fetch_yahoo_news(keyword="台積電", limit=30):
             except:
                 continue
 
-            news_list.append({'title': title, 'content': content, 'published_time': published_dt})
+            NEW_FIREBASE_KEY_list.append({'title': title, 'content': content, 'published_time': published_dt})
     except:
         pass
 
-    return news_list
+    return NEW_FIREBASE_KEY_list
 
 # ---------------------- CNBC ---------------------- #
-def fetch_cnbc_news(keyword_list=["TSMC"], limit=20):
+def fetch_cnbc_NEW_FIREBASE_KEY(keyword_list=["TSMC"], limit=20):
     print(f"\n📡 CNBC：{'/'.join(keyword_list)}")
     urls = [
         "https://www.cnbc.com/search/?query=" + '+'.join(keyword_list)
     ]
-    news, seen = [], set()
+    NEW_FIREBASE_KEY, seen = [], set()
 
     for url in urls:
         try:
@@ -219,7 +219,7 @@ def fetch_cnbc_news(keyword_list=["TSMC"], limit=20):
             articles = soup.select("article a")
 
             for a in articles:
-                if len(news) >= limit:
+                if len(NEW_FIREBASE_KEY) >= limit:
                     break
                 title = a.get_text(strip=True)
                 href = a.get("href")
@@ -249,21 +249,21 @@ def fetch_cnbc_news(keyword_list=["TSMC"], limit=20):
                     continue
 
                 seen.add(title)
-                news.append({'title': title, 'content': content, 'published_time': published_dt})
+                NEW_FIREBASE_KEY.append({'title': title, 'content': content, 'published_time': published_dt})
         except:
             continue
 
-    return news
+    return NEW_FIREBASE_KEY
 
 # ---------------------- Firestore ---------------------- #
-def save_news(news_list, collection):
+def save_NEW_FIREBASE_KEY(NEW_FIREBASE_KEY_list, collection):
     doc_id = datetime.now().strftime("%Y%m%d")
     ref = db.collection(collection).document(doc_id)
 
     data = {}
-    for i, n in enumerate(news_list, 1):
+    for i, n in enumerate(NEW_FIREBASE_KEY_list, 1):
         emb = generate_embedding(n.get("content", ""))
-        data[f"news_{i}"] = {
+        data[f"NEW_FIREBASE_KEY_{i}"] = {
             "title": n.get("title", ""),
             "price_change": n.get("price_change", "無資料"),
             "content": n.get("content", ""),
@@ -278,21 +278,21 @@ def save_news(news_list, collection):
 if __name__ == "__main__":
 
     # 台積電
-    tsmc_news = fetch_technews("台積電", 30) + fetch_yahoo_news("台積電", 30) + fetch_cnbc_news(["TSMC"], 20)
-    if tsmc_news:
-        tsmc_news = add_price_change(tsmc_news, "台積電")
-        save_news(tsmc_news, "NEWS")
+    tsmc_NEW_FIREBASE_KEY = fetch_techNEW_FIREBASE_KEY("台積電", 30) + fetch_yahoo_NEW_FIREBASE_KEY("台積電", 30) + fetch_cnbc_NEW_FIREBASE_KEY(["TSMC"], 20)
+    if tsmc_NEW_FIREBASE_KEY:
+        tsmc_NEW_FIREBASE_KEY = add_price_change(tsmc_NEW_FIREBASE_KEY, "台積電")
+        save_NEW_FIREBASE_KEY(tsmc_NEW_FIREBASE_KEY, "NEW_FIREBASE_KEY")
 
     # 鴻海
-    fox_news = fetch_yahoo_news("鴻海", 30)
-    if fox_news:
-        fox_news = add_price_change(fox_news, "鴻海")
-        save_news(fox_news, "NEWS_Foxxcon")
+    fox_NEW_FIREBASE_KEY = fetch_yahoo_NEW_FIREBASE_KEY("鴻海", 30)
+    if fox_NEW_FIREBASE_KEY:
+        fox_NEW_FIREBASE_KEY = add_price_change(fox_NEW_FIREBASE_KEY, "鴻海")
+        save_NEW_FIREBASE_KEY(fox_NEW_FIREBASE_KEY, "NEW_FIREBASE_KEY_Foxxcon")
 
     # 聯電
-    umc_news = fetch_technews("聯電", 20) + fetch_yahoo_news("聯電", 30) + fetch_cnbc_news(["UMC"], 20)
-    if umc_news:
-        umc_news = add_price_change(umc_news, "聯電")
-        save_news(umc_news, "NEWS_UMC")
+    umc_NEW_FIREBASE_KEY = fetch_techNEW_FIREBASE_KEY("聯電", 20) + fetch_yahoo_NEW_FIREBASE_KEY("聯電", 30) + fetch_cnbc_NEW_FIREBASE_KEY(["UMC"], 20)
+    if umc_NEW_FIREBASE_KEY:
+        umc_NEW_FIREBASE_KEY = add_price_change(umc_NEW_FIREBASE_KEY, "聯電")
+        save_NEW_FIREBASE_KEY(umc_NEW_FIREBASE_KEY, "NEW_FIREBASE_KEY_UMC")
 
     print("\n🎉 全部新聞抓取完成！")
