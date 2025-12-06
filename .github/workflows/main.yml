@@ -30,10 +30,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 4. Save Firebase key
+      # 4. Save Firebase key (preserve formatting)
       - name: Save Firebase key
         run: |
-          echo "${{ secrets.NEW_FIREBASE_KEY }}" > firebase_key.json
+          cat <<EOF > firebase_key.json
+${{ secrets.NEW_FIREBASE_KEY }}
+EOF
           test -s firebase_key.json || (echo "❌ firebase_key.json is empty" && exit 1)
 
       # 5. Run robo.py
