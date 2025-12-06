@@ -8,7 +8,7 @@ on:
     - cron: '30 15 * * *'
   workflow_dispatch:
  
-permissions:
+permissions: 
   contents: write
 
 jobs:
