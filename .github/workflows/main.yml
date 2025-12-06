@@ -8,7 +8,7 @@ on:
     - cron: '30 15 * * *'  # 每天 15:30 UTC+0 執行
   workflow_dispatch: {}    # 手動觸發
 
-permissions: 
+permissions:
   contents: write
 
 jobs:
@@ -30,12 +30,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 4. Save Firebase key (preserve formatting)
+      # 4. Save Firebase key (decode from Base64)
       - name: Save Firebase key
         run: |
-          cat <<EOF > firebase_key.json
-${{ secrets.NEW_FIREBASE_KEY }}
-EOF
+          echo "${{ secrets.NEW_FIREBASE_KEY_B64 }}" | base64 --decode > firebase_key.json
           test -s firebase_key.json || (echo "❌ firebase_key.json is empty" && exit 1)
 
       # 5. Run robo.py
@@ -43,6 +41,7 @@ EOF
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/firebase_key.json
+          NEW_FIREBASE_KEY: ${{ secrets.NEW_FIREBASE_KEY_B64 }}
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
@@ -53,6 +52,7 @@ EOF
       - name: Run Together.py and save result
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/firebase_key.json
+          NEW_FIREBASE_KEY: ${{ secrets.NEW_FIREBASE_KEY_B64 }}
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
