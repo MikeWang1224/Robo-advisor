@@ -7,7 +7,7 @@
 import os
 import time
 import json
-import requests
+import requests 
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import warnings
