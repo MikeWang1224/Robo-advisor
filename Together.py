@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取程式（Yahoo Finance）
-版本：Liteon-Yahoo v1
------------------------------------
-✔ 抓光寶科 Yahoo 新聞（36 小時內）
-✔ Firestore 上傳
-✔ HuggingFace 免費 Embedding
+光寶科新聞抓取（Yahoo）
+只抓光寶科 + 36 小時內新聞
 """
 
 import os
@@ -20,18 +16,8 @@ from firebase_admin import credentials, firestore
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
-# ---------------------- 設定 ---------------------- #
+# ----- 設定 -----
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
-
-HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
-HF_TOKEN = os.environ.get("HF_TOKEN")
-
-if not HF_TOKEN:
-    raise ValueError("⚠️ 找不到 HF_TOKEN，請在 GitHub Secrets 設定！")
-
-HF_HEADERS = {
-    "Authorization": f"Bearer {HF_TOKEN}"
-}
 
 # Firestore 初始化
 key_dict = json.loads(os.environ["NEW_FIREBASE_KEY"])
@@ -39,46 +25,30 @@ cred = credentials.Certificate(key_dict)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ---------------------- 時間過濾 ---------------------- #
+
+# ----- 時間過濾 -----
 def is_recent(published_time, hours=36):
     now = datetime.now().astimezone()
     return (now - published_time) <= timedelta(hours=hours)
 
-# ---------------------- 抓 Yahoo 文章內容 ---------------------- #
+
+# ----- 抓文章內容 -----
 def fetch_article_content(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
-        paragraphs = soup.select('article p') or soup.select('p')
 
-        text = '\n'.join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 40])
+        paragraphs = soup.select('article p') or soup.select('p')
+        text = "\n".join([p.get_text(strip=True) for p in paragraphs])
         return text[:1500] + ('...' if len(text) > 1500 else '')
     except:
         return "無法取得新聞內容"
 
-# ---------------------- HuggingFace Embedding ---------------------- #
-def generate_embedding(text):
-    if not text:
-        return []
-    try:
-        res = requests.post(
-            HF_API_URL,
-            headers=HF_HEADERS,
-            json={"inputs": text[:1000]},
-            timeout=20
-        )
-        data = res.json()
-        if isinstance(data, list):
-            return data
-    except:
-        pass
-    return []
 
-# ---------------------- Yahoo 搜尋光寶科 ---------------------- #
-def fetch_yahoo_liteon(limit=30):
-    print("\n📡 Yahoo：光寶科")
-    keyword = "光寶科"
-    base = "https://tw.stock.yahoo.com"
+# ----- Yahoo 新聞 -----
+def fetch_yahoo_news(keyword="光寶科", limit=30):
+    print(f"📡 Yahoo：{keyword}")
+    base = "https://tw.news.yahoo.com"
     url = f"{base}/search?p={keyword}&sort=time"
 
     news_list, seen = [], set()
@@ -101,10 +71,10 @@ def fetch_yahoo_liteon(limit=30):
             if href and not href.startswith("http"):
                 href = base + href
 
-            # 抓文章內容
+            # 內容與時間
             content = fetch_article_content(href)
 
-            # 抓發佈時間
+            # 時間
             try:
                 r2 = requests.get(href, headers=HEADERS)
                 s2 = BeautifulSoup(r2.text, 'html.parser')
@@ -117,16 +87,16 @@ def fetch_yahoo_liteon(limit=30):
                     time_tag["datetime"].replace("Z", "+00:00")
                 ).astimezone()
 
-                if not is_recent(published_dt):
+                if not is_recent(published_dt, 36):
                     continue
 
             except:
                 continue
 
             news_list.append({
-                'title': title,
-                'content': content,
-                'published_time': published_dt
+                "title": title,
+                "content": content,
+                "published_time": published_dt
             })
 
     except:
@@ -134,30 +104,28 @@ def fetch_yahoo_liteon(limit=30):
 
     return news_list
 
-# ---------------------- Firestore 儲存 ---------------------- #
-def save_news_to_firestore(news_list):
-    if not news_list:
-        print("⚠️ 無光寶科新聞可寫入 Firebase")
-        return
 
+# ----- Firestore 儲存 -----
+def save_news(news_list):
     doc_id = datetime.now().strftime("%Y%m%d")
-    ref = db.collection("NEWS_Liteon").document(doc_id)
+    ref = db.collection("NEWS_LiteOn").document(doc_id)
 
     data = {}
     for i, n in enumerate(news_list, 1):
-        emb = generate_embedding(n["content"])
         data[f"news_{i}"] = {
             "title": n["title"],
             "content": n["content"],
-            "embedding": emb,
             "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M")
         }
 
     ref.set(data)
-    print(f"✅ Firestore 儲存完成：NEWS_Liteon/{doc_id}")
+    print(f"✅ Firestore 儲存完成：NEWS_LiteOn/{doc_id}")
 
-# ---------------------- 主程式 ---------------------- #
+
+# ----- 主程式 -----
 if __name__ == "__main__":
-    liteon_news = fetch_yahoo_liteon(30)
-    save_news_to_firestore(liteon_news)
-    print("\n🎉 光寶科 Yahoo 新聞抓取完成！")
+    liteon_news = fetch_yahoo_news("光寶科", 30)
+    if liteon_news:
+        save_news(liteon_news)
+
+    print("\n🎉 光寶科新聞抓取完成！")
