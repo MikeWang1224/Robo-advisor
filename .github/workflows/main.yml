@@ -5,9 +5,9 @@ on:
     branches:
       - main
   schedule:
-    - cron: '30 15 * * *'
-  workflow_dispatch:
- 
+    - cron: '30 15 * * *'  # 每天 15:30 UTC+0 執行
+  workflow_dispatch: {}    # 手動觸發
+
 permissions: 
   contents: write
 
