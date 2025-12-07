@@ -26,9 +26,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 3. Install dependencies
+      # 3. Install dependencies (補上 beautifulsoup4)
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install beautifulsoup4
 
       # 4. Save Firebase key (decode from Base64)
       - name: Save Firebase key
