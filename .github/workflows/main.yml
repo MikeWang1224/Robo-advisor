@@ -50,15 +50,15 @@ jobs:
           python robo.py > results/robo_result_${today}.txt
           echo "ROBO_TODAY=$today" >> $GITHUB_ENV
 
-      # 6. Run Together.py
-      - name: Run Together.py and save result
+      # 6. Run CatchNews.py
+      - name: Run CatchNews.py and save result
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/firebase_key.json
           NEW_FIREBASE_KEY: ${{ secrets.NEW_FIREBASE_KEY_B64 }}
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
-          python Together.py > results/together_result_${today}.txt
+          python CatchNews.py > results/together_result_${today}.txt
           echo "TOGETHER_TODAY=$today" >> $GITHUB_ENV
 
       # 7. Commit and push results
