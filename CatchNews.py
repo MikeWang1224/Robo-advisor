@@ -7,11 +7,10 @@
 ✔ Yahoo 支援翻頁、多種 selector
 ✔ 鉅亨網 keyword 搜尋
 ✔ 每次存入 Firestore 前覆蓋 document（清空舊資料）
-✔ 使用環境變數 GROQ_API_KEY 作 Firebase 金鑰 JSON 內容
+✔ 使用環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 Firebase 金鑰 JSON 檔
 """
 
 import os
-import json
 import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -23,9 +22,8 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# ----- Firestore 初始化（用 JSON 內容） -----
-service_account_info = json.loads(os.environ["NEW_FIREBASE_KEY"])
-cred = credentials.Certificate(service_account_info)
+# ----- Firestore 初始化（用環境變數 JSON 檔路徑） -----
+cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
