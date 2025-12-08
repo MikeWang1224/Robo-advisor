@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-光寶科 Yahoo 原生新聞抓取 + Firestore 寫入（只抓光寶科）
-✔ 只抓 Yahoo 原生（tw.news.yahoo.com）
-✔ 自動解轉址
-✔ 抓新聞全文（支援多種 caas-body 結構）
-✔ 僅抓最近 36 小時新聞
-✔ 寫入 Firestore，不存 link
+光寶科新聞抓取（TechNews + Yahoo + CNBC）
+✔ 只抓光寶科
+✔ 抓新聞全文
+✔ 時間過濾：36 小時內
+✔ 寫入 Firestore，不存股價
 """
 
 import os
+import time
 import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
@@ -26,125 +26,159 @@ db = firestore.client()
 COLL_NAME = "NEWS_LiteOn"
 KEYWORDS = ["光寶科", "光寶", "2301"]
 MAX_HOURS = 36
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # -----------------------------
-# 時間判斷
+# 時間過濾
 # -----------------------------
-def in_range(dt):
+def is_recent(dt):
     return (datetime.now() - dt).total_seconds() <= MAX_HOURS * 3600
 
-def parse_relative_time(text):
-    now = datetime.now()
+# -----------------------------
+# TechNews
+# -----------------------------
+def fetch_technews(keyword="光寶科", limit=30):
+    print(f"\n📡 TechNews：{keyword}")
+    links, news = [], []
+    url = f'https://technews.tw/google-search/?googlekeyword={keyword}'
     try:
-        if "分鐘前" in text:
-            return now - timedelta(minutes=int(text.replace(" 分鐘前", "")))
-        if "小時前" in text:
-            return now - timedelta(hours=int(text.replace(" 小時前", "")))
-        if "天前" in text:
-            return now - timedelta(days=int(text.replace(" 天前", "")))
+        res = requests.get(url, headers=HEADERS)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if href.startswith('https://technews.tw/') and '/tag/' not in href:
+                if href not in links:
+                    links.append(href)
+        links = links[:limit]
     except:
-        pass
-    return now
+        return []
 
-# -----------------------------
-# 解 Yahoo 轉址
-# -----------------------------
-def resolve_redirect(url):
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True, timeout=10)
-        return r.url
-    except:
-        return url
-
-# -----------------------------
-# 抓 Yahoo 原生文章內容
-# -----------------------------
-def fetch_yahoo_article(url):
-    try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        SELECTORS = [
-            "div.caas-body p",
-            "article.caas-body p",
-            "div.caas-content p",
-            "div.caas-body-wrapper p",
-            "div.caas-body > p",
-        ]
-        for css in SELECTORS:
-            paras = soup.select(css)
-            if paras:
-                return "\n".join([p.get_text(strip=True) for p in paras if len(p.get_text(strip=True)) > 20])
-        return ""
-    except:
-        return ""
-
-# -----------------------------
-# 抓 Yahoo 搜尋頁
-# -----------------------------
-def fetch_yahoo_search():
-    print("📡 抓取 Yahoo 搜尋頁…")
-    url = "https://tw.news.search.yahoo.com/search?p=光寶科&sort=time"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        items = soup.select("div.NewsArticle")
-        results = []
-
-        for n in items:
-            title_tag = n.select_one("h4 > a")
+    for link in links:
+        try:
+            r = requests.get(link, headers=HEADERS)
+            s = BeautifulSoup(r.text, 'html.parser')
+            title_tag = s.find('h1')
             if not title_tag:
                 continue
             title = title_tag.get_text(strip=True)
-            if not any(k in title for k in KEYWORDS):
+            time_tag = s.find("time", class_="entry-date")
+            if not time_tag:
                 continue
-            raw_link = title_tag["href"]
-            real_url = resolve_redirect(raw_link)
-            if "tw.news.yahoo.com" not in real_url:
+            published_dt = datetime.strptime(time_tag.get_text(strip=True), "%Y/%m/%d %H:%M")
+            if not is_recent(published_dt):
                 continue
+            paras = s.select("article p") or s.select("p")
+            content = "\n".join([p.get_text(strip=True) for p in paras if len(p.get_text(strip=True)) > 40])
+            news.append({"title": title, "content": content[:1500], "time": published_dt.strftime("%Y-%m-%d %H:%M"), "source": "TechNews"})
+            time.sleep(0.3)
+        except:
+            continue
+    return news
 
-            t = n.select_one("span.s-time")
-            pub = parse_relative_time(t.get_text(strip=True)) if t else datetime.now()
-            if not in_range(pub):
+# -----------------------------
+# Yahoo
+# -----------------------------
+def fetch_yahoo(keyword="光寶科", limit=30):
+    print(f"\n📡 Yahoo：{keyword}")
+    base = "https://tw.news.yahoo.com"
+    url = f"{base}/search?p={keyword}&sort=time"
+    news_list, seen = [], set()
+    try:
+        r = requests.get(url, headers=HEADERS)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        links = soup.select('a.js-content-viewer') or soup.select('h3 a')
+        for a in links:
+            if len(news_list) >= limit:
+                break
+            title = a.get_text(strip=True)
+            if not title or title in seen:
                 continue
-
-            content = fetch_yahoo_article(real_url)
-            if not content:
+            seen.add(title)
+            href = a.get("href")
+            if href and not href.startswith("http"):
+                href = base + href
+            # 文章內容與時間
+            try:
+                r2 = requests.get(href, headers=HEADERS)
+                s2 = BeautifulSoup(r2.text, 'html.parser')
+                content = "\n".join([p.get_text(strip=True) for p in s2.select("article p") or s2.select("p") if len(p.get_text(strip=True)) > 40])
+                time_tag = s2.find("time")
+                if not time_tag or not time_tag.has_attr("datetime"):
+                    continue
+                published_dt = datetime.fromisoformat(time_tag["datetime"].replace("Z", "+00:00"))
+                if not is_recent(published_dt):
+                    continue
+                news_list.append({"title": title, "content": content[:1500], "time": published_dt.strftime("%Y-%m-%d %H:%M"), "source": "Yahoo"})
+            except:
                 continue
+    except:
+        pass
+    return news_list
 
-            results.append({
-                "title": title,
-                "content": content,
-                "time": pub.strftime("%Y-%m-%d %H:%M"),
-                "source": "Yahoo"
-            })
-
-        print(f"✔ Yahoo (原生) 抓到 {len(results)} 則（已抓全文）")
-        return results
-
-    except Exception as e:
-        print(f"❌ 抓取 Yahoo 搜尋頁失敗: {e}")
-        return []
+# -----------------------------
+# CNBC
+# -----------------------------
+def fetch_cnbc(keyword_list=["Lite-On"], limit=20):
+    print(f"\n📡 CNBC：{'/'.join(keyword_list)}")
+    urls = ["https://www.cnbc.com/search/?query=" + '+'.join(keyword_list)]
+    news, seen = [], set()
+    for url in urls:
+        try:
+            r = requests.get(url, headers=HEADERS)
+            soup = BeautifulSoup(r.text, 'html.parser')
+            articles = soup.select("article a")
+            for a in articles:
+                if len(news) >= limit:
+                    break
+                title = a.get_text(strip=True)
+                href = a.get("href")
+                if not title or title in seen or not href:
+                    continue
+                if not any(k.lower() in title.lower() for k in keyword_list):
+                    continue
+                if not href.startswith("http"):
+                    href = "https://www.cnbc.com" + href
+                try:
+                    r2 = requests.get(href, headers=HEADERS)
+                    s2 = BeautifulSoup(r2.text, 'html.parser')
+                    content = "\n".join([p.get_text(strip=True) for p in s2.select("p") if len(p.get_text(strip=True)) > 40])
+                    time_tag = s2.find("time")
+                    if not time_tag or not time_tag.has_attr("datetime"):
+                        continue
+                    published_dt = datetime.fromisoformat(time_tag["datetime"].replace("Z", "+00:00"))
+                    if not is_recent(published_dt):
+                        continue
+                    seen.add(title)
+                    news.append({"title": title, "content": content[:1500], "time": published_dt.strftime("%Y-%m-%d %H:%M"), "source": "CNBC"})
+                except:
+                    continue
+        except:
+            continue
+    return news
 
 # -----------------------------
 # Firestore 寫入
 # -----------------------------
-def write_to_firestore(news_list):
+def save_news(news_list):
     if not news_list:
-        print("⚠️ 沒有 Yahoo 原生新聞可寫入")
+        print("⚠️ 沒有新聞可寫入")
         return
     today = datetime.now().strftime("%Y%m%d")
-    doc_ref = db.collection(COLL_NAME).document(today)
-    doc_ref.set({"news_list": news_list}, merge=True)
+    ref = db.collection(COLL_NAME).document(today)
+    data = {}
+    for i, n in enumerate(news_list, 1):
+        data[f"news_{i}"] = n
+    ref.set(data)
     print(f"🔥 Firestore 已寫入 → {COLL_NAME}/{today}")
-    print(f"📦 共 {len(news_list)} 則新聞（含全文）")
+    print(f"📦 共 {len(news_list)} 則新聞")
 
 # -----------------------------
-# 主流程
+# 主程式
 # -----------------------------
-def main():
-    yahoo_news = fetch_yahoo_search()
-    write_to_firestore(yahoo_news)
-
 if __name__ == "__main__":
-    main()
+    all_news = []
+    all_news += fetch_technews("光寶科", 30)
+    all_news += fetch_yahoo("光寶科", 30)
+    all_news += fetch_cnbc(["Lite-On"], 20)
+    save_news(all_news)
+    print("\n🎉 全部新聞抓取完成！")
