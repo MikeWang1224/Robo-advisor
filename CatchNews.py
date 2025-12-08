@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo 搜尋 + 鉅亨全文）+ Firestore 寫入
-✔ 抓標題
-✔ 自動解轉址（Yahoo redirect）
-✔ 抓新聞全文
+光寶科 Yahoo 原生新聞抓取 + Firestore 寫入
+✔ 只抓 Yahoo 原生（tw.news.yahoo.com）
+✔ 自動解轉址
+✔ 抓新聞全文（支援多種 caas-body 結構）
 ✔ 寫入 Firestore，不存 link
 """
 
@@ -45,21 +45,31 @@ def resolve_redirect(url):
 
 
 # ----------------------------------------------------------
-# 抓 Yahoo 新聞內文
+# 抓 Yahoo 原生新聞內文（支援全部 caas-body 型態）
 # ----------------------------------------------------------
 def fetch_yahoo_article(url):
     try:
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        paras = soup.select("div.caas-body p")
-        if not paras:
-            return ""
+        # Yahoo 內文可能存在的所有 selector
+        SELECTORS = [
+            "div.caas-body p",
+            "article.caas-body p",
+            "div.caas-content p",
+            "div.caas-body-wrapper p",
+            "div.caas-body > p",
+        ]
 
-        text = "\n".join([p.get_text(strip=True) for p in paras])
-        return text
+        for css in SELECTORS:
+            paras = soup.select(css)
+            if paras:
+                return "\n".join([p.get_text(strip=True) for p in paras])
 
-    except:
+        return ""
+
+    except Exception as e:
+        print("❌ Yahoo article fetch error:", e)
         return ""
 
 
@@ -75,8 +85,8 @@ def fetch_yahoo_search():
     soup = BeautifulSoup(resp.text, "html.parser")
 
     results = []
-
     items = soup.select("div.NewsArticle")
+
     for n in items:
         title_tag = n.select_one("h4 > a")
         if not title_tag:
@@ -89,14 +99,18 @@ def fetch_yahoo_search():
         if not any(k in title for k in KEYWORDS):
             continue
 
-        # 時間
+        # 時間（相對時間）
         t = n.select_one("span.s-time")
         pub = parse_relative_time(t.get_text(strip=True)) if t else datetime.now()
         if not in_range(pub):
             continue
 
-        # 解轉址
+        # 解析真正網址
         real_url = resolve_redirect(raw_link)
+
+        # 僅保留 Yahoo 原生
+        if "tw.news.yahoo.com" not in real_url:
+            continue
 
         # 抓內文
         content = fetch_yahoo_article(real_url)
@@ -108,10 +122,13 @@ def fetch_yahoo_search():
             "source": "Yahoo"
         })
 
-    print(f"✔ Yahoo 搜尋抓到 {len(results)} 則（已抓全文）")
+    print(f"✔ Yahoo (原生) 抓到 {len(results)} 則（已抓全文）")
     return results
 
 
+# ----------------------------------------------------------
+# 解析相對時間
+# ----------------------------------------------------------
 def parse_relative_time(text):
     now = datetime.now()
     try:
@@ -124,47 +141,6 @@ def parse_relative_time(text):
     except:
         pass
     return now
-
-
-# ----------------------------------------------------------
-# 鉅亨網全文抓取
-# ----------------------------------------------------------
-def fetch_cnyes():
-    print("📡 抓取 鉅亨網…")
-
-    url = "https://news.cnyes.com/search?keyword=光寶科"
-    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    results = []
-    items = soup.select("a._1Zdp")
-
-    for n in items:
-        title = n.get_text(strip=True)
-        link = "https://news.cnyes.com" + n.get("href", "")
-
-        if any(k in title for k in KEYWORDS):
-            content = fetch_cnyes_article(link)
-
-            results.append({
-                "title": title,
-                "content": content,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "source": "Cnyes"
-            })
-
-    print(f"✔ 鉅亨網抓到 {len(results)} 則（已抓全文）")
-    return results
-
-
-def fetch_cnyes_article(url):
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(r.text, "html.parser")
-        paras = soup.select("article p")
-        return "\n".join([p.get_text(strip=True) for p in paras])
-    except:
-        return ""
 
 
 # ----------------------------------------------------------
@@ -185,15 +161,12 @@ def write_to_firestore(news_list):
 # ----------------------------------------------------------
 def main():
     yahoo = fetch_yahoo_search()
-    cnyes = fetch_cnyes()
 
-    all_news = yahoo + cnyes
-
-    if not all_news:
-        print("⚠️ 沒有新聞可寫入 Firestore")
+    if not yahoo:
+        print("⚠️ 沒有 Yahoo 原生新聞可寫入")
         return
 
-    write_to_firestore(all_news)
+    write_to_firestore(yahoo)
 
 
 if __name__ == "__main__":
