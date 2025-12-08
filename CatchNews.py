@@ -3,13 +3,15 @@
 光寶科新聞抓取（Yahoo + 鉅亨網）
 條件：
 ✔ 3 天內（72 小時）
-✔ 標題或內文只要提到光寶科/光寶/2301就算一則
+✔ 標題或內文只要提到光寶科/光寶/2301 就算一則
 ✔ Yahoo 支援翻頁、多種 selector
 ✔ 鉅亨網 keyword 搜尋
 ✔ 每次存入 Firestore 前覆蓋 document（清空舊資料）
+✔ 使用環境變數 GROQ_API_KEY 作 Firebase 金鑰 JSON 內容
 """
 
 import os
+import json
 import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -21,8 +23,9 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# Firestore 初始化
-cred = credentials.Certificate(os.environ["GROQ_API_KEY"])
+# ----- Firestore 初始化（用 JSON 內容） -----
+service_account_info = json.loads(os.environ["GROQ_API_KEY"])
+cred = credentials.Certificate(service_account_info)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -169,8 +172,7 @@ def fetch_cnyes_news(limit=40):
 # Firestore 儲存（清空舊資料）
 # =============================
 def save_news(news_list):
-    # 測試用 document ID
-    doc_id = "111"
+    doc_id = "111"  # 測試用，固定 document
     ref = db.collection("NEWS_LiteOn").document(doc_id)
 
     data = {}
