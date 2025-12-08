@@ -1,29 +1,28 @@
 # -*- coding: utf-8 -*-
 """
-CatchNews.py
+liteon_news_google15.py
 
-功能：
-- 抓取光寶科 (2301) 最近兩天新聞
-- Google News RSS 每次最多抓 15 則
-- 只儲存 title + content + published_time + source
-- 使用 workflow 提供的 Base64 金鑰 NEW_FIREBASE_KEY 初始化 Firestore
+- 只抓最近兩天內的光寶科新聞
+- 最多 15 則
+- 使用 Base64 金鑰 NEW_FIREBASE_KEY_B64 初始化 Firestore
+- 時間判斷使用 UTC
 """
 
 import os
 import re
 import json
+import base64
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 import feedparser
 import firebase_admin
 from firebase_admin import credentials, firestore
-import base64
 
-# ---------- Firestore 初始化（使用 Base64 金鑰 NEW_FIREBASE_KEY） ----------
-key_b64 = os.environ.get("NEW_FIREBASE_KEY")
+# ---------- Firestore 初始化（使用 Base64 金鑰 NEW_FIREBASE_KEY_B64） ----------
+key_b64 = os.environ.get("NEW_FIREBASE_KEY_B64")
 if not key_b64:
-    raise ValueError("❌ 找不到 NEW_FIREBASE_KEY 環境變數")
+    raise ValueError("❌ 找不到 NEW_FIREBASE_KEY_B64 環境變數")
 
 key_json = base64.b64decode(key_b64)
 cred = credentials.Certificate(json.loads(key_json))
@@ -32,7 +31,6 @@ db = firestore.client()
 
 # ---------- 公用函式 ----------
 def fetch_article(url, max_len=2000):
-    """抓取文章全文"""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -44,20 +42,22 @@ def fetch_article(url, max_len=2000):
         return "(抓取失敗)"
 
 def contains_keyword(text):
-    """判斷是否含光寶科關鍵字"""
     keywords = ["光寶科", "光寶", "2301"]
     return any(k in text for k in keywords)
 
 def is_recent(published_dt):
-    """published_dt 是 datetime 物件，判斷是否兩天內"""
+    """判斷是否兩天內，使用 UTC"""
     if not published_dt:
         return False
-    return published_dt >= datetime.now() - timedelta(days=2)
+    now_utc = datetime.now(timezone.utc)
+    published_utc = published_dt.replace(tzinfo=timezone.utc)
+    return published_utc >= now_utc - timedelta(days=2)
 
 # ---------- Google News RSS ----------
 def fetch_google_news_liteon(limit=15):
     news = []
-    rss_url = "https://news.google.com/rss/search?q=光寶科&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    # 使用 when:2d 參數只抓最近兩天新聞
+    rss_url = "https://news.google.com/rss/search?q=光寶科+when:2d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
     try:
         feed = feedparser.parse(rss_url)
@@ -66,11 +66,9 @@ def fetch_google_news_liteon(limit=15):
 
             # -------- 解析 published_time --------
             published_dt = None
-
             if entry.get("published_parsed"):
                 published_dt = datetime(*entry.published_parsed[:6])
             else:
-                # 嘗試 "YYYY-MM-DD HH:MM:SS" 格式
                 published_raw = entry.get("published", "")
                 try:
                     published_dt = datetime.strptime(published_raw, "%Y-%m-%d %H:%M:%S")
@@ -86,6 +84,7 @@ def fetch_google_news_liteon(limit=15):
             link = entry.get("link", "")
             content = fetch_article(link)
 
+            # 關鍵字過濾
             if not contains_keyword(title) and not contains_keyword(content):
                 continue
 
@@ -97,7 +96,6 @@ def fetch_google_news_liteon(limit=15):
                 "published_time": published_time
             })
 
-            # 最終限制：最多 15 則
             if len(news) >= limit:
                 break
 
@@ -110,14 +108,13 @@ def fetch_google_news_liteon(limit=15):
 def save_to_firestore(news_list):
     today = datetime.now().strftime("%Y%m%d")
     doc_ref = db.collection("NEWS_LiteOn").document(today)
-
     data = {f"news_{i}": news for i, news in enumerate(news_list, 1)}
     doc_ref.set(data, merge=True)
     print(f"✔ 已新增 {len(news_list)} 則新聞到 Firestore: NEWS_LiteOn/{today}")
 
 # ---------- 主程式 ----------
 def main():
-    print("▶ 正在抓取光寶科新聞（最多 15 則，兩天內）...")
+    print("▶ 正在抓取光寶科新聞（最多 15 則，最近兩天內）...")
     news_list = fetch_google_news_liteon(limit=15)
 
     if not news_list:
