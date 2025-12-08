@@ -3,9 +3,9 @@
 liteon_news_only.py
 
 功能：
-- 抓取光寶科 (2301) 新聞（目前來源 Yahoo 股市）
-- 只儲存 title + content + published time + source，不做 AI 分析
-- 寫入 Firestore -> collection: NEWS_LiteOn / document: YYYYMMDD / fields: news_1, news_2...
+- 抓取光寶科 (2301) 新聞
+- 只儲存 title + content + published_time + source
+- 不做 AI 分析，也不存 ai_analyzed / ai_error
 """
 
 import os
