@@ -1,2 +1,4 @@
 ▶ 正在抓取光寶科新聞...
+Yahoo股市抓取失敗: HTTPConnectionPool(host='localhost', port=34271): Read timed out. (read timeout=120)
+ETtoday抓取失敗: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
 ✔ 已新增 100 則新聞到 Firestore: NEWS_LiteOn/20251208
