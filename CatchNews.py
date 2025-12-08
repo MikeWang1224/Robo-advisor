@@ -6,6 +6,7 @@ liteon_news_google15.py
 - 最多 15 則
 - 使用 Base64 金鑰 NEW_FIREBASE_KEY_B64 初始化 Firestore
 - 時間判斷使用 UTC
+- 執行前會清空今天的 Firestore 文件
 """
 
 import os
@@ -108,6 +109,12 @@ def fetch_google_news_liteon(limit=15):
 def save_to_firestore(news_list):
     today = datetime.now().strftime("%Y%m%d")
     doc_ref = db.collection("NEWS_LiteOn").document(today)
+
+    # ---------- 清空今日文件 ----------
+    doc_ref.delete()
+    print(f"🗑 已清空 Firestore: NEWS_LiteOn/{today}")
+
+    # ---------- 寫入新資料 ----------
     data = {f"news_{i}": news for i, news in enumerate(news_list, 1)}
     doc_ref.set(data, merge=True)
     print(f"✔ 已新增 {len(news_list)} 則新聞到 Firestore: NEWS_LiteOn/{today}")
