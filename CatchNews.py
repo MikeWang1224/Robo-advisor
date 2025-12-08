@@ -5,8 +5,6 @@
 """
 
 import os
-import time
-import json
 import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -108,7 +106,7 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
 
 
 # =============================
-#  鉅亨網（正確 JSON 路徑版）
+#  鉅亨網（修正 JSON 路徑 & fallback 關鍵字）
 # =============================
 def fetch_cnyes_news(keyword="光寶科", limit=30):
     print(f"📡 鉅亨網：{keyword}")
@@ -124,7 +122,7 @@ def fetch_cnyes_news(keyword="光寶科", limit=30):
             r = requests.get(url, headers=HEADERS, timeout=10)
             data = r.json()
 
-            # ⭐ 正確的 JSON 路徑
+            # 正確 JSON 路徑
             items = data.get("items", {}).get("data", [])
 
             if not items:
