@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo 強化版）
+光寶科新聞抓取（Yahoo + TechNews 強化版）
 ✔ 多關鍵字：光寶科 / 光寶 / 2301
-✔ 抓多頁：page=1~3
-✔ 新版＋舊版 Yahoo 同時支援
+✔ Yahoo 抓多頁 + 新舊版支援
+✔ TechNews 多頁解析
 ✔ 抓新聞全文
-✔ 時間：36 小時內
-✔ 寫入 Firestore（不含股價）
+✔ 時間過濾：36 小時內
+✔ 寫入 Firestore（不存股價）
 """
 
 import os
@@ -26,7 +26,7 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 COLL_NAME = "NEWS_LiteOn"
-KEYWORDS = ["光寶科", "光寶", "2301"]
+KEYWORDS = ["光寶科", "光寶", "2301"]  # 多關鍵字
 MAX_HOURS = 36
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -36,17 +36,18 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 def is_recent(dt):
     return (datetime.now(timezone.utc) - dt).total_seconds() <= MAX_HOURS * 3600
 
+
 # -----------------------------
-# Yahoo 抓取（強化）
+# Yahoo 強化抓取
 # -----------------------------
-def fetch_yahoo_multi(limit_each=30):
-    print("\n📡 Yahoo 搜尋強化版")
+def fetch_yahoo(limit_each=30):
+    print("\n📡 Yahoo 強化抓取中...")
 
     base = "https://tw.news.yahoo.com"
     all_news, seen_links = [], set()
 
     for keyword in KEYWORDS:
-        print(f"\n🔍 關鍵字：{keyword}")
+        print(f"\n🔍 Yahoo 搜尋關鍵字：{keyword}")
 
         for page in range(1, 4):  # 抓 3 頁
             url = f"{base}/search?p={keyword}&sort=time&b={(page-1)*10+1}"
@@ -58,7 +59,7 @@ def fetch_yahoo_multi(limit_each=30):
                 # 新版 Yahoo
                 links = soup.select("a.js-content-viewer")
 
-                # 舊版 Yahoo Fallback
+                # 舊版 Yahoo
                 if not links:
                     links = soup.select("h3 a")
 
@@ -66,13 +67,15 @@ def fetch_yahoo_multi(limit_each=30):
                     href = a.get("href")
                     if not href:
                         continue
+
                     if not href.startswith("http"):
                         href = base + href
+
                     if href in seen_links:
                         continue
                     seen_links.add(href)
 
-                    # 抓內文
+                    # 抓全文
                     try:
                         r2 = requests.get(href, headers=HEADERS, timeout=10)
                         s2 = BeautifulSoup(r2.text, "html.parser")
@@ -89,6 +92,7 @@ def fetch_yahoo_multi(limit_each=30):
                             if len(p.get_text(strip=True)) > 40
                         )[:1500]
 
+                        # 時間
                         time_tag = s2.find("time")
                         if not time_tag or not time_tag.has_attr("datetime"):
                             continue
@@ -108,10 +112,89 @@ def fetch_yahoo_multi(limit_each=30):
 
                         time.sleep(0.3)
 
-                    except Exception:
+                    except:
                         continue
 
-            except Exception:
+            except:
+                continue
+
+    return all_news
+
+
+# -----------------------------
+# TechNews 強化抓取
+# -----------------------------
+def fetch_technews(limit_pages=3):
+    print("\n📡 TechNews 強化抓取中...")
+
+    base = "https://technews.tw"
+    all_news, seen_links = [], set()
+
+    for keyword in KEYWORDS:
+        print(f"\n🔍 TechNews 搜尋關鍵字：{keyword}")
+        url = f"https://technews.tw/google-search/?googlekeyword={keyword}"
+
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            raw_links = soup.find_all("a", href=True)
+            links = []
+
+            for a in raw_links:
+                href = a["href"]
+                if href.startswith(base) and "/tag/" not in href:
+                    if href not in links:
+                        links.append(href)
+
+            links = links[:50]  # 避免抓太多
+
+        except:
+            continue
+
+        # 抓每篇文章
+        for link in links:
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+
+            try:
+                r2 = requests.get(link, headers=HEADERS, timeout=10)
+                s2 = BeautifulSoup(r2.text, "html.parser")
+
+                title_tag = s2.find("h1")
+                if not title_tag:
+                    continue
+                title = title_tag.get_text(strip=True)
+
+                time_tag = s2.find("time", class_="entry-date")
+                if not time_tag:
+                    continue
+
+                published_dt = datetime.strptime(
+                    time_tag.get_text(strip=True), "%Y/%m/%d %H:%M"
+                ).replace(tzinfo=timezone.utc)
+
+                if not is_recent(published_dt):
+                    continue
+
+                paras = s2.select("article p") or s2.select("p")
+                content = "\n".join(
+                    p.get_text(strip=True)
+                    for p in paras
+                    if len(p.get_text(strip=True)) > 40
+                )[:1500]
+
+                all_news.append({
+                    "title": title,
+                    "content": content,
+                    "time": published_dt.strftime("%Y-%m-%d %H:%M"),
+                    "source": "TechNews"
+                })
+
+                time.sleep(0.3)
+
+            except:
                 continue
 
     return all_news
@@ -136,10 +219,17 @@ def save_news(news_list):
     print(f"🔥 Firestore 已寫入 → {COLL_NAME}/{today}")
     print(f"📦 共 {len(news_list)} 則新聞")
 
+
 # -----------------------------
 # 主程式
 # -----------------------------
 if __name__ == "__main__":
-    all_news = fetch_yahoo_multi()
+    all_news = []
+
+    # Yahoo + TechNews
+    all_news += fetch_yahoo()
+    all_news += fetch_technews()
+
     save_news(all_news)
-    print("\n🎉 Yahoo 新聞抓取完成（強化版）！")
+
+    print("\n🎉 Yahoo + TechNews 新聞抓取完成！")
