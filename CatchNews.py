@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-liteon_news_selenium_full.py
+liteon_news_multi_source.py
 
 功能：
 - 抓取光寶科 (2301) 新聞
-- 來源：Yahoo 股市、中時新聞網、工商時報
-- 使用 Selenium 抓取動態生成頁面
+- 來源：Yahoo 股市、鉅亨網、中時新聞網、工商時報、MoneyDJ、ETtoday、TechNews、Google News RSS
 - 只儲存 title + content + published_time + source
 - 不做 AI 分析，也不存 ai_analyzed / ai_error
 """
@@ -13,14 +12,11 @@ liteon_news_selenium_full.py
 import os
 import re
 import time
+import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import requests
+import feedparser
+
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -51,51 +47,70 @@ def contains_keyword(text):
 def fetch_yahoo_liteon():
     url = "https://tw.stock.yahoo.com/quote/2301/news"
     headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
-    result = []
-
-    for a in soup.select("a.js-content-viewer"):
-        title = a.get_text(strip=True)
-        if not contains_keyword(title):
-            continue
-        link = "https://tw.stock.yahoo.com" + a["href"]
-        content = fetch_article(link)
-        if not contains_keyword(content):
-            continue
-        result.append({
-            "title": title,
-            "content": content,
-            "source": "Yahoo股市",
-            "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-    return result
-
-# ---------- Selenium 初始化 ----------
-def init_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")  # 無頭模式
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(options=chrome_options)
-    return driver
-
-# ---------- 中時新聞網 ----------
-def fetch_chinatimes_liteon(driver, max_news=20):
     result = []
     try:
-        driver.get("https://www.chinatimes.com/search/光寶科")
-        # 等待文章列表出現
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.articlebox h3 a"))
-        )
-        # 滾動到底部以載入更多文章
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        res = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        for a in soup.select("a.js-content-viewer"):
+            title = a.get_text(strip=True)
+            if not contains_keyword(title):
+                continue
+            link = "https://tw.stock.yahoo.com" + a["href"]
+            content = fetch_article(link)
+            if not contains_keyword(content):
+                continue
+            result.append({
+                "title": title,
+                "content": content,
+                "source": "Yahoo股市",
+                "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+    except:
+        pass
+    return result
+
+# ---------- 鉅亨網 ----------
+def fetch_cnyes_liteon(limit=50):
+    result = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    keywords = ["光寶科", "光寶", "2301"]
+    for kw in keywords:
+        try:
+            url = f"https://api.cnyes.com/media/api/v1/search/list?keyword={kw}&limit={limit}"
+            r = requests.get(url, headers=headers, timeout=10)
+            items = r.json().get("items", {}).get("data", [])
+            for item in items:
+                title = item.get("title", "")
+                if not contains_keyword(title):
+                    continue
+                news_id = item.get("newsId")
+                if not news_id:
+                    continue
+                link = f"https://news.cnyes.com/news/id/{news_id}?exp=a"
+                content = fetch_article(link)
+                if not contains_keyword(content):
+                    continue
+                timestamp = item.get("publishAt", 0)
+                published_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                result.append({
+                    "title": title,
+                    "content": content,
+                    "source": "鉅亨網",
+                    "published_time": published_time
+                })
+        except:
+            continue
+    return result
+
+# ---------- 中時新聞網 ----------
+def fetch_chinatimes_liteon():
+    result = []
+    try:
+        url = "https://www.chinatimes.com/search/光寶科"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
         articles = soup.select("div.articlebox h3 a")
-        for a in articles[:max_news]:
+        for a in articles:
             title = a.get_text(strip=True)
             if not contains_keyword(title):
                 continue
@@ -111,23 +126,19 @@ def fetch_chinatimes_liteon(driver, max_news=20):
                 "source": "中時新聞網",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except Exception as e:
-        print("中時新聞抓取失敗:", e)
+    except:
+        pass
     return result
 
 # ---------- 工商時報 ----------
-def fetch_ct_liteon(driver, max_news=20):
+def fetch_ct_liteon():
     result = []
     try:
-        driver.get("https://ctee.com.tw/search/光寶科")
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "h3 a"))
-        )
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        url = "https://ctee.com.tw/search/%E5%85%89%E5%AF%B6%E7%A7%91"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
         articles = soup.select("h3 a")
-        for a in articles[:max_news]:
+        for a in articles:
             title = a.get_text(strip=True)
             if not contains_keyword(title):
                 continue
@@ -143,8 +154,113 @@ def fetch_ct_liteon(driver, max_news=20):
                 "source": "工商時報",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except Exception as e:
-        print("工商時報抓取失敗:", e)
+    except:
+        pass
+    return result
+
+# ---------- MoneyDJ ----------
+def fetch_moneydj_liteon():
+    result = []
+    try:
+        url = "https://www.moneydj.com/KMDJ/News/NewsList/Finance"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        articles = soup.select("div.news_listbox a")
+        for a in articles:
+            title = a.get_text(strip=True)
+            if not contains_keyword(title):
+                continue
+            link = a.get("href")
+            if not link.startswith("http"):
+                link = "https://www.moneydj.com" + link
+            content = fetch_article(link)
+            if not contains_keyword(content):
+                continue
+            result.append({
+                "title": title,
+                "content": content,
+                "source": "MoneyDJ",
+                "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+    except:
+        pass
+    return result
+
+# ---------- ETtoday 財經 ----------
+def fetch_ettoday_liteon():
+    result = []
+    try:
+        url = "https://www.ettoday.net/news/focus/%E5%85%89%E5%AF%B6%E7%A7%91"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        articles = soup.select("h3 a")
+        for a in articles:
+            title = a.get_text(strip=True)
+            if not contains_keyword(title):
+                continue
+            link = a.get("href")
+            if not link.startswith("http"):
+                link = "https://www.ettoday.net" + link
+            content = fetch_article(link)
+            if not contains_keyword(content):
+                continue
+            result.append({
+                "title": title,
+                "content": content,
+                "source": "ETtoday",
+                "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+    except:
+        pass
+    return result
+
+# ---------- TechNews ----------
+def fetch_technews_liteon():
+    result = []
+    try:
+        url = "https://technews.tw/?s=%E5%85%89%E5%AF%B6%E7%A7%91"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        articles = soup.select("h3.entry-title a")
+        for a in articles:
+            title = a.get_text(strip=True)
+            if not contains_keyword(title):
+                continue
+            link = a.get("href")
+            content = fetch_article(link)
+            if not contains_keyword(content):
+                continue
+            result.append({
+                "title": title,
+                "content": content,
+                "source": "TechNews",
+                "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+    except:
+        pass
+    return result
+
+# ---------- Google News RSS ----------
+def fetch_google_news_liteon():
+    result = []
+    try:
+        rss_url = "https://news.google.com/rss/search?q=光寶科&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        feed = feedparser.parse(rss_url)
+        for entry in feed.entries:
+            title = entry.get("title", "")
+            link = entry.get("link", "")
+            content = fetch_article(link)
+            if not contains_keyword(title) and not contains_keyword(content):
+                continue
+            published_time = datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d %H:%M:%S") if entry.get("published_parsed") else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result.append({
+                "title": title,
+                "content": content,
+                "source": "Google News",
+                "published_time": published_time
+            })
+    except:
+        pass
     return result
 
 # ---------- 寫入 Firestore ----------
@@ -161,13 +277,14 @@ def save_to_firestore(news_list):
 def main():
     print("▶ 正在抓取光寶科新聞...")
     news_list = []
-    # Yahoo
     news_list.extend(fetch_yahoo_liteon())
-    # Selenium
-    driver = init_driver()
-    news_list.extend(fetch_chinatimes_liteon(driver))
-    news_list.extend(fetch_ct_liteon(driver))
-    driver.quit()
+    news_list.extend(fetch_cnyes_liteon())
+    news_list.extend(fetch_chinatimes_liteon())
+    news_list.extend(fetch_ct_liteon())
+    news_list.extend(fetch_moneydj_liteon())
+    news_list.extend(fetch_ettoday_liteon())
+    news_list.extend(fetch_technews_liteon())
+    news_list.extend(fetch_google_news_liteon())
 
     if not news_list:
         print("⚠ 沒抓到資料")
