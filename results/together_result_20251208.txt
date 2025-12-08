@@ -1,4 +1,22 @@
-📡 抓取 Yahoo 新聞
-📡 抓取 鉅亨網
-🔍 共抓到 0 則光寶科相關新聞（3 天內）
-🎉 光寶科新聞抓取完成！
+fetch_unprocessed_news -> 取得 4 則尚未分析的新聞
+[1/4] 分析 20251208/news_3 - 「護國神山」台積電入陣！00952成分股地震踢出台光電 「這檔」矽光子題材股參戰確認
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+ -> Groq 無回傳或解析失敗，標記嘗試後跳過：20251208/news_3
+[2/4] 分析 20251208/news_1 - 台積電利多點燃AI行情！台股高檔續攻 相關供應鏈有望再創新高
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+ -> Groq 無回傳或解析失敗，標記嘗試後跳過：20251208/news_1
+[3/4] 分析 20251208/news_2 - 金馬選股年2／股債誰優有雜音 專家看好這三類產業
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+ -> Groq 無回傳或解析失敗，標記嘗試後跳過：20251208/news_2
+[4/4] 分析 20251207/news_1 - 台積電利多點燃AI行情！台股高檔續攻 相關供應鏈有望再創新高
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+呼叫 Groq 發生例外： HTTPSConnectionPool(host='api.groq.ai', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='api.groq.ai', port=443): Failed to resolve 'api.groq.ai' ([Errno -2] Name or service not known)"))
+ -> Groq 無回傳或解析失敗，標記嘗試後跳過：20251207/news_1
+處理完成，共分析 0 筆新聞。
