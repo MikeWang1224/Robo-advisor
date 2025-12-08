@@ -1,3 +1,2 @@
-📡 抓取 Yahoo 股市 — 光寶科新聞 (Selenium)
-🔍 共抓到 0 則光寶科股市新聞（3 天內）
-🎉 光寶科股市新聞抓取完成！
+📡 正在抓取 Yahoo 股市 — 光寶科新聞 (2301.TW)…
+[Error] API 抓取錯誤：400 Client Error: Bad Request for url: https://tw.stock.yahoo.com/_td-stock/api/resource/StockNewsService;symbols=2301.TW
