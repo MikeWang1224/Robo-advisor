@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo）
-✔ 只抓光寶科
+光寶科新聞抓取（Yahoo 強化版）
+✔ 多關鍵字：光寶科 / 光寶 / 2301
+✔ 抓多頁：page=1~3
+✔ 新版＋舊版 Yahoo 同時支援
 ✔ 抓新聞全文
-✔ 時間過濾：36 小時內
-✔ 寫入 Firestore（不存股價）
+✔ 時間：36 小時內
+✔ 寫入 Firestore（不含股價）
 """
 
 import os
@@ -35,78 +37,85 @@ def is_recent(dt):
     return (datetime.now(timezone.utc) - dt).total_seconds() <= MAX_HOURS * 3600
 
 # -----------------------------
-# Yahoo 抓取
+# Yahoo 抓取（強化）
 # -----------------------------
-def fetch_yahoo(keyword="光寶科", limit=30):
-    print(f"\n📡 Yahoo：{keyword}")
+def fetch_yahoo_multi(limit_each=30):
+    print("\n📡 Yahoo 搜尋強化版")
+
     base = "https://tw.news.yahoo.com"
-    url = f"{base}/search?p={keyword}&sort=time"
+    all_news, seen_links = [], set()
 
-    news_list, seen = [], set()
+    for keyword in KEYWORDS:
+        print(f"\n🔍 關鍵字：{keyword}")
 
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
+        for page in range(1, 4):  # 抓 3 頁
+            url = f"{base}/search?p={keyword}&sort=time&b={(page-1)*10+1}"
 
-        # Yahoo 搜尋結果
-        links = soup.select('a.js-content-viewer') or soup.select('h3 a')
-
-        for a in links:
-            if len(news_list) >= limit:
-                break
-
-            title = a.get_text(strip=True)
-            if not title or title in seen:
-                continue
-            seen.add(title)
-
-            href = a.get("href")
-            if href and not href.startswith("http"):
-                href = base + href
-
-            # -----------------------------
-            # 抓取內文 + 時間
-            # -----------------------------
             try:
-                r2 = requests.get(href, headers=HEADERS, timeout=10)
-                s2 = BeautifulSoup(r2.text, 'html.parser')
+                r = requests.get(url, headers=HEADERS, timeout=10)
+                soup = BeautifulSoup(r.text, "html.parser")
 
-                # ---- 抓全文（避免 403 簡化版本）----
-                paras = s2.select("article p") or s2.select("p")
-                content = "\n".join(
-                    p.get_text(strip=True)
-                    for p in paras
-                    if len(p.get_text(strip=True)) > 40
-                )[:1500]
+                # 新版 Yahoo
+                links = soup.select("a.js-content-viewer")
 
-                # ---- 抓時間 ----
-                time_tag = s2.find("time")
-                if not time_tag or not time_tag.has_attr("datetime"):
-                    continue
+                # 舊版 Yahoo Fallback
+                if not links:
+                    links = soup.select("h3 a")
 
-                published_dt = datetime.fromisoformat(
-                    time_tag["datetime"].replace("Z", "+00:00")
-                )
+                for a in links:
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    if not href.startswith("http"):
+                        href = base + href
+                    if href in seen_links:
+                        continue
+                    seen_links.add(href)
 
-                if not is_recent(published_dt):
-                    continue
+                    # 抓內文
+                    try:
+                        r2 = requests.get(href, headers=HEADERS, timeout=10)
+                        s2 = BeautifulSoup(r2.text, "html.parser")
 
-                news_list.append({
-                    "title": title,
-                    "content": content,
-                    "time": published_dt.strftime("%Y-%m-%d %H:%M"),
-                    "source": "Yahoo"
-                })
+                        title = s2.find("h1")
+                        if not title:
+                            continue
+                        title = title.get_text(strip=True)
 
-                time.sleep(0.3)
+                        paras = s2.select("article p") or s2.select("p")
+                        content = "\n".join(
+                            p.get_text(strip=True)
+                            for p in paras
+                            if len(p.get_text(strip=True)) > 40
+                        )[:1500]
+
+                        time_tag = s2.find("time")
+                        if not time_tag or not time_tag.has_attr("datetime"):
+                            continue
+
+                        published_dt = datetime.fromisoformat(
+                            time_tag["datetime"].replace("Z", "+00:00")
+                        )
+                        if not is_recent(published_dt):
+                            continue
+
+                        all_news.append({
+                            "title": title,
+                            "content": content,
+                            "time": published_dt.strftime("%Y-%m-%d %H:%M"),
+                            "source": "Yahoo"
+                        })
+
+                        time.sleep(0.3)
+
+                    except Exception:
+                        continue
 
             except Exception:
                 continue
 
-    except Exception:
-        pass
+    return all_news
 
-    return news_list
 
 # -----------------------------
 # Firestore 寫入
@@ -131,6 +140,6 @@ def save_news(news_list):
 # 主程式
 # -----------------------------
 if __name__ == "__main__":
-    all_news = fetch_yahoo("光寶科", 30)
+    all_news = fetch_yahoo_multi()
     save_news(all_news)
-    print("\n🎉 Yahoo 新聞抓取完成！")
+    print("\n🎉 Yahoo 新聞抓取完成（強化版）！")
