@@ -7,6 +7,7 @@
 ✔ Yahoo 支援翻頁、多種 selector
 ✔ 鉅亨網 keyword 搜尋
 ✔ 每次存入 Firestore 前覆蓋 document（清空舊資料）
+✔ Firestore document ID 使用當天日期：/NEWS_LiteOn/YYYYMMDD
 ✔ 使用環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 Firebase 金鑰 JSON 檔
 """
 
@@ -167,10 +168,10 @@ def fetch_cnyes_news(limit=40):
 
 
 # =============================
-# Firestore 儲存（清空舊資料）
+# Firestore 儲存（清空舊資料，document 用當天日期）
 # =============================
 def save_news(news_list):
-    doc_id = "111"  # 測試用，固定 document
+    doc_id = datetime.now().strftime("%Y%m%d")  # 今天日期
     ref = db.collection("NEWS_LiteOn").document(doc_id)
 
     data = {}
