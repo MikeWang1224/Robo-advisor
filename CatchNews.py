@@ -4,23 +4,22 @@ Yahoo 財經新聞抓取（光寶科）
 只抓財報 / 法說 / 公司公告相關新聞
 時間過濾：36 小時內
 Firestore 存儲：NEWS_LiteOn / YYYYMMDD / articles -> 每篇一個 doc
+本地備份：result.txt
 """
 import os
 import time
 import hashlib
 import logging
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 import re
 
-# optional: better date parsing
 try:
     from dateutil import parser as dateparser
 except Exception:
     dateparser = None
 
-# Firestore
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -44,7 +43,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 if not firebase_admin._apps:
     cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if not cred_path:
-        logging.error("請先設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向你的 Firebase key JSON")
+        logging.error("請先設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向你的 Firebase key JSON 檔案")
         raise SystemExit("Missing GOOGLE_APPLICATION_CREDENTIALS")
     cred = credentials.Certificate(cred_path)
     firebase_admin.initialize_app(cred)
@@ -121,7 +120,7 @@ def doc_id_from_url(url):
     return hashlib.sha1(url.encode("utf-8")).hexdigest()
 
 # ---------------- Yahoo 財經抓取 ----------------
-def fetch_yahoo_financial(keywords=None, pages=3, per_page_limit=40):
+def fetch_yahoo_financial(keywords=None, pages=5, per_page_limit=50):
     if keywords is None:
         keywords = KEYWORDS
     base = "https://tw.news.yahoo.com"
@@ -146,7 +145,6 @@ def fetch_yahoo_financial(keywords=None, pages=3, per_page_limit=40):
                 if href in seen_urls:
                     continue
                 seen_urls.add(href)
-                # 取得文章
                 time.sleep(SLEEP_BETWEEN_REQ)
                 r2 = safe_get(href)
                 if not r2:
@@ -168,7 +166,6 @@ def fetch_yahoo_financial(keywords=None, pages=3, per_page_limit=40):
                 content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
                 if not content:
                     continue
-                # 只抓財報 / 法說相關新聞
                 if not contains_keywords(title + " " + content, FIN_KEYWORDS):
                     continue
                 results.append({
@@ -222,11 +219,28 @@ def save_to_firestore(article_list):
         logging.warning(f"寫入 meta 失敗: {e}")
     logging.info(f"Firestore 已寫入：新增 {added} 篇（總抓取 {len(article_list)} 篇）")
 
+# ---------------- Save to local file ----------------
+def save_to_local(article_list, filename="result.txt"):
+    if not article_list:
+        logging.info("沒有文章要寫入本地檔案")
+        return
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            for art in article_list:
+                f.write(f"[{art['time']}] {art['title']}\n")
+                f.write(f"{art['content']}\n")
+                f.write(f"URL: {art['url']}\n")
+                f.write("-"*60 + "\n")
+        logging.info(f"已寫入本地檔案：{filename}")
+    except Exception as e:
+        logging.warning(f"寫入本地檔案失敗: {e}")
+
 # ---------------- Main ----------------
 def main():
     logging.info("開始抓取（Yahoo 財經光寶科財報新聞）")
     all_articles = fetch_yahoo_financial(KEYWORDS, pages=5, per_page_limit=50)
     save_to_firestore(all_articles)
+    save_to_local(all_articles)
     logging.info("抓取完成。")
 
 if __name__ == "__main__":
