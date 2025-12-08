@@ -1,310 +1,261 @@
 # -*- coding: utf-8 -*-
 """
-股票新聞分析工具（單公司 RAG 版：光寶科 2301）
-完全可跑版（短期預測特化） - Context-aware + 背離 偵測
-⬆️ 修正：今天新聞 100% 會被抓到
-⬆️ 新增：標題命中但 內文沒命中 → 直接排除
-"""    
+光寶科新聞抓取 + Groq 情緒分析（Yahoo + 鉅亨網）
+✔ 3 天內
+✔ 中文金融模型評估：利多/利空/中性 + -1~1 分數 + 事件類型
+✔ 寫入 Firestore（NEWS_LiteOn）
+"""
 
-import os, signal, regex as re
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import List, Tuple
-from google.cloud import firestore
-from dotenv import load_dotenv
-from groq import Groq
+import os
+import requests
+import json
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+import warnings
+import firebase_admin
+from firebase_admin import credentials, firestore
+from groq import Groq  # <--- 新增
 
-# ---------- 設定 ----------
-SILENT_MODE = True
-TAIWAN_TZ = timezone(timedelta(hours=8))
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
-TOKENS_COLLECTION = "bull_tokens"
-NEWS_COLLECTION_LITE = "NEWS_LITE"           # 光寶科新聞 collection
-RESULT_COLLECTION_LITE = "Groq_result_LITE" # 光寶科分析結果
+HEADERS = {'User-Agent': 'Mozilla/5.0'}
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))   # <--- Groq 初始化
 
-SENSITIVE_WORDS = {
-    "法說": 1.5, "財報": 1.4, "新品": 1.3, "合作": 1.3,
-    "併購": 1.4, "投資": 1.3, "停工": 1.6, "下修": 1.5,
-    "利空": 1.5, "爆料": 1.4, "營收": 1.3, "展望": 1.2,
-}
+# Firestore 初始化
+cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-STOP = False
-def _sigint_handler(signum, frame):
-    global STOP
-    STOP = True
-    print("\n[info] 偵測到 Ctrl+C，將安全停止…")
-signal.signal(signal.SIGINT, _sigint_handler)
 
-if os.path.exists(".env"):
-    load_dotenv(".env", override=True)
+# ----- 時間過濾（72 小時） -----
+def is_recent(published_time, hours=72):
+    now = datetime.now().astimezone()
+    return (now - published_time) <= timedelta(hours=hours)
 
-client = Groq(api_key=os.getenv("NEW_FIREBASE_KEY"))
 
-# ---------- 結構 ----------
-@dataclass
-class Token:
-    polarity: str
-    ttype: str
-    pattern: str
-    weight: float
-    note: str
-
-@dataclass
-class MatchResult:
-    score: float
-    hits: List[Tuple[str, float, str]]
-
-# ---------- 工具 ----------
-def get_db():
-    return firestore.Client()
-
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
-
-def first_n_sentences(text: str, n: int = 3) -> str:
-    if not text:
-        return ""
-    parts = re.split(r'(?<=[。\.！!\?？；;])\s*', text.strip())
-    return "".join(parts[:n]) + ("..." if len(parts) > n else "")
-
-def parse_docid_time(doc_id: str):
-    m = re.match(r"^(?P<ymd>\d{8})(?:_(?P<hms>\d{6}))?$", doc_id or "")
-    if not m:
-        return datetime.now(TAIWAN_TZ)
-
-    ymd, hms = m.group("ymd"), m.group("hms") or "000000"
+# ----- 抓文章內容 -----
+def fetch_article_content(url):
     try:
-        return datetime.strptime(ymd + hms, "%Y%m%d%H%M%S").replace(tzinfo=TAIWAN_TZ)
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        paragraphs = soup.select('article p') or soup.select('p')
+        text = "\n".join(p.get_text(strip=True) for p in paragraphs)
+        return text[:1500] + ('...' if len(text) > 1500 else '')
     except:
-        return datetime.now(TAIWAN_TZ)
+        return ""
 
-def parse_price_change(val):
-    if not isinstance(val, str) or not val.strip():
-        return 0.0
-    m = re.search(r"\((-?\d*\.?\d+)%\)", val)
-    if m:
-        return float(m.group(1))
-    m = re.search(r"([-+]?\d*\.?\d+)%", val)
-    if m:
-        return float(m.group(1))
-    return 0.0
 
-# ---------- Token ----------
-def load_tokens(db):
-    pos, neg = [], []
-    for d in db.collection(TOKENS_COLLECTION).stream():
-        data = d.to_dict() or {}
-        pol = data.get("polarity", "").lower()
-        ttype = data.get("type", "substr").lower()
-        patt = data.get("pattern", "")
-        note = data.get("note", "")
-        w = float(data.get("weight", 1.0))
-        if pol == "positive": pos.append(Token(pol, ttype, patt, w, note))
-        elif pol == "negative": neg.append(Token(pol, ttype, patt, -abs(w), note))
-    return pos, neg
+# ----- 關鍵字判斷 -----
+def contains_keyword(title, content):
+    keywords = ["光寶科", "光寶", "2301"]
+    text = (title + " " + content)
+    return any(k in text for k in keywords)
 
-def compile_tokens(tokens: List[Token]):
-    compiled = []
-    for t in tokens:
-        if t.ttype == "regex":
+
+# ----- Groq AI：新聞情緒、事件分析 -----
+def analyze_news_groq(title, content):
+    try:
+        prompt = f"""
+你是一位台股金融分析師，請閱讀以下新聞，針對「光寶科(2301)」評估對股價的可能影響。
+
+請輸出 JSON 格式：
+{{
+  "sentiment": "利多 or 利空 or 中性",
+  "score": -1.0 ~ 1.0,
+  "reason": "簡短原因（必填）",
+  "event": "接單/財報/法說/停工/出貨/訴訟/新品/一般新聞"
+}}
+
+新聞標題：{title}
+新聞內容：{content}
+"""
+
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="qwen-2.5-32b",  # 中文模型（金融適用）
+            temperature=0.3,
+            max_tokens=300
+        )
+
+        text = response.choices[0].message.content
+        try:
+            result = json.loads(text)
+        except:
+            return None
+
+        return result
+
+    except Exception as e:
+        print("❌ GROQ 分析錯誤：", e)
+        return None
+
+
+# =============================
+#  Yahoo 新聞
+# =============================
+def fetch_yahoo_news(limit=80, pages=4):
+    print("📡 抓取 Yahoo 新聞")
+    base = "https://tw.news.yahoo.com"
+    
+    news_list = []
+    seen = set()
+
+    for page in range(1, pages + 1):
+        url = f"https://tw.news.search.yahoo.com/search?p=光寶科&b={(page-1)*10+1}"
+        r = requests.get(url, headers=HEADERS)
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        candidates = (
+            soup.select("a.js-content-viewer") +
+            soup.select("h3 a") +
+            soup.select("a.d-ib") +
+            soup.select("a[data-ylk]")
+        )
+
+        for a in candidates:
+            if len(news_list) >= limit:
+                return news_list
+
+            title = a.get_text(strip=True)
+            if not title or title in seen:
+                continue
+            seen.add(title)
+
+            href = a.get("href")
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = base + href
+
+            content = fetch_article_content(href)
+            if not contains_keyword(title, content):
+                continue
+
             try:
-                compiled.append(("regex", re.compile(t.pattern, re.I), t.weight, t.note, t.pattern))
+                r2 = requests.get(href, headers=HEADERS)
+                s2 = BeautifulSoup(r2.text, 'html.parser')
+                time_tag = s2.find("time")
+
+                if not time_tag or not time_tag.has_attr("datetime"):
+                    continue
+
+                published_dt = datetime.fromisoformat(
+                    time_tag["datetime"].replace("Z", "+00:00")
+                ).astimezone()
+
+                if not is_recent(published_dt):
+                    continue
+
             except:
                 continue
-        else:
-            compiled.append(("substr", None, t.weight, t.note, t.pattern.lower()))
-    return compiled
 
-# ---------- Scoring ----------
-def score_text(text: str, pos_c, neg_c, target: str = None) -> MatchResult:
-    norm = normalize(text)
-    score, hits, seen = 0.0, [], set()
+            # *** AI 分析 ***
+            ai = analyze_news_groq(title, content)
 
-    aliases = {
-        "光寶科": ["光寶科", "liteon", "2301"],
-    }
-    company_keywords = aliases.get(target, [])
-    if not any(a.lower() in norm for a in company_keywords):
-        return MatchResult(0.0, [])
+            news_list.append({
+                "title": title,
+                "content": content,
+                "published_time": published_dt,
+                "source": "Yahoo",
+                "ai": ai
+            })
 
-    for ttype, cre, w, note, patt in pos_c + neg_c:
-        key = (patt, note)
-        if key in seen:
-            continue
-        matched = cre.search(norm) if ttype == "regex" else patt in norm
-        if matched:
-            score += w
-            hits.append((patt, w, note))
-            seen.add(key)
+    return news_list
 
-    return MatchResult(score, hits)
 
-def adjust_score_for_context(text: str, base_score: float) -> float:
-    if not text or base_score == 0:
-        return base_score
-    norm = text.lower()
-    neutral_phrases = ["重申", "符合預期", "預期內", "中性看待", "無重大影響", "持平", "未變"]
-    if any(p in norm for p in neutral_phrases):
-        base_score *= 0.4
-    positive_boost = ["創新高", "倍增", "大幅成長", "獲利暴增", "報喜"]
-    negative_boost = ["暴跌", "下滑", "虧損", "停工", "下修", "裁員", "警訊"]
-    if any(p in norm for p in positive_boost): base_score *= 1.3
-    if any(p in norm for p in negative_boost): base_score *= 1.3
-    return base_score
+# =============================
+#  鉅亨網
+# =============================
+def fetch_cnyes_news(limit=40):
+    print("📡 抓取 鉅亨網")
 
-# ---------- 背離偵測 ----------
-def detect_divergence(avg_score: float, top_news):
-    key_news = top_news[:5]
-    price_moves = []
-    strength = []
+    keywords = ["光寶科", "光寶", "2301"]
+    news_list = []
+    seen = set()
 
-    for _, _, _, res, weight, price_change in key_news:
-        pc = price_change if price_change is not None else 0.0
-        price_moves.append(pc * weight)
-        strength.append(abs(res.score * weight))
+    for kw in keywords:
+        try:
+            url = f"https://api.cnyes.com/media/api/v1/search/list?keyword={kw}&limit=50"
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            items = r.json().get("items", {}).get("data", [])
 
-    if not price_moves:
-        return "無足夠資料判斷背離。"
+            for item in items:
+                if len(news_list) >= limit:
+                    return news_list
 
-    avg_strength = sum(strength) / len(strength)
-    if avg_strength < 0.4:
-        return "新聞力道偏弱，無明顯背離。"
+                title = item.get("title", "")
+                if not title or title in seen:
+                    continue
+                seen.add(title)
 
-    avg_price_move = sum(price_moves) / len(price_moves)
-    STRONG = 0.7
-    MEDIUM = 0.35
+                timestamp = item.get("publishAt", 0)
+                if not timestamp:
+                    continue
 
-    if avg_score > STRONG and avg_price_move < -0.2:
-        return "新聞偏強多，但股價顯著下跌，屬正向背離（可能短線反彈）。"
-    if avg_score > MEDIUM and avg_price_move < -0.5:
-        return "新聞多方略強，股價卻走弱，可能正向背離。"
-    if avg_score < -STRONG and avg_price_move > 0.2:
-        return "新聞偏強空，但股價顯著上漲，屬負向背離（可能短線回檔）。"
-    if avg_score < -MEDIUM and avg_price_move > 0.5:
-        return "新聞空方略強，股價卻上漲，可能負向背離。"
-    return "股價走勢與新聞情緒一致，無明顯背離。"
+                published_dt = datetime.fromtimestamp(timestamp).astimezone()
+                if not is_recent(published_dt):
+                    continue
 
-# ---------- Groq ----------
-def groq_analyze(news_list, target, avg_score, divergence_note=None):
-    if not news_list:
-        return f"隔日{target}股價走勢：不明確 ⚖️\n原因：近三日無相關新聞"
-    combined = "\n".join(f"{i+1}. ({s:+.2f}) {t}" for i, (t, s) in enumerate(news_list))
-    divergence_text = f"\n此外，背離判斷：{divergence_note}" if divergence_note else ""
-    prompt = f"""
-你是一位專業的台股金融分析師，請根據以下「{target}」近三日新聞摘要，
-依情緒分數與內容趨勢，嚴格推論隔日股價方向。
-請只輸出「走勢 + 原因」，不要輸出情緒分數。
+                article_url = f"https://news.cnyes.com/news/id/{item.get('newsId')}?exp=a"
+                content = fetch_article_content(article_url)
 
-請用以下格式：
-隔日{target}股價走勢：{{上漲／微漲／微跌／下跌／不明確}}（附符號）
-原因：{{一句 55 字內}}
-{divergence_text}
+                if not contains_keyword(title, content):
+                    continue
 
-整體平均情緒分數：{avg_score:+.2f}
-新聞摘要（含分數）：
-{combined}
-"""
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "你是台股量化分析員，需依情緒分數產生明確結論，但輸出不能包含情緒分數。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.15,
-            max_tokens=220,
-        )
-        ans = resp.choices[0].message.content.strip()
-        ans = re.sub(r"情緒分數[:：]\s*-?\d+(\.\d+)?", "", ans)
-        ans = re.sub(r"\n{2,}", "\n", ans).strip()
-        m_trend = re.search(r"(上漲|微漲|微跌|下跌|不明確)", ans)
-        trend = m_trend.group(1) if m_trend else "不明確"
-        symbol_map = {"上漲": "🔼", "微漲": "↗️", "微跌": "↘️", "下跌": "🔽", "不明確": "⚖️"}
-        m_reason = re.search(r"(?:原因|理由)[:：]\s*(.*)", ans)
-        reason = m_reason.group(1).strip() if m_reason else ""
-        return f"下個預測{target}股價走勢：{trend} {symbol_map.get(trend, '')}\n原因：{reason}"
-    except Exception as e:
-        return f"隔日{target}股價走勢：不明確 ⚖️\n原因：Groq分析失敗({e})"
+                # *** AI 分析 ***
+                ai = analyze_news_groq(title, content)
 
-# ---------- 主分析 ----------
-def analyze_target(db, collection, target, result_field):
-    pos, neg = load_tokens(db)
-    pos_c, neg_c = compile_tokens(pos), compile_tokens(neg)
-    today = datetime.now(TAIWAN_TZ).date()
-    filtered = []
-    seen_news = set()
-    company_alias = {
-        "光寶科": ["光寶科", "liteon", "2301"],
-    }[target]
+                news_list.append({
+                    "title": title,
+                    "content": content,
+                    "published_time": published_dt,
+                    "source": "鉅亨網",
+                    "ai": ai
+                })
 
-    for d in db.collection(collection).stream():
-        dt = parse_docid_time(d.id)
-        delta_days = max(0, (today - dt.date()).days)
-        if delta_days > 1: 
-            continue
-        day_weight = 1.0 if delta_days == 0 else 0.85
-        data = d.to_dict() or {}
-        for k, v in data.items():
-            if not isinstance(v, dict): continue
-            title, content = v.get("title",""), v.get("content","")
-            title_hit = any(a in title for a in company_alias)
-            content_hit = any(a in content for a in company_alias)
-            if title_hit and not content_hit: continue
-            full_raw = f"{title}|{content}"
-            if full_raw in seen_news: continue
-            seen_news.add(full_raw)
-            price_raw = v.get("price_change", "")
-            price_change = parse_price_change(price_raw)
-            full = f"{title} {content} 股價變動：{price_raw}"
-            res = score_text(full, pos_c, neg_c, target)
-            if not res.hits: continue
-            adj_score = adjust_score_for_context(full, res.score)
-            token_weight = 1.0 + min(len(res.hits) * 0.05, 0.3)
-            impact = 1.0 + sum(w*0.05 for k_sens,w in SENSITIVE_WORDS.items() if k_sens in full)
-            total_weight = day_weight * token_weight * impact
-            filtered.append((d.id, k, title, res, total_weight, price_change))
+        except Exception as e:
+            print("鉅亨網抓取錯誤：", e)
 
-    if not filtered:
-        print(f"{target}：近三日無新聞，交由 Groq 判斷。\n")
-        summary = groq_analyze([], target, 0)
-    else:
-        filtered.sort(key=lambda x: abs(x[3].score * x[4]), reverse=True)
-        top_news = filtered[:10]
-        print(f"\n📰 {target} 近期重點新聞（含衝擊）：")
-        for docid, key, title, res, weight, price_change in top_news:
-            impact = sum(w for k_sens, w in SENSITIVE_WORDS.items() if k_sens in title)
-            print(f"[{docid}#{key}] ({weight:.2f}x, 分數={res.score:+.2f}, 衝擊={1+impact/10:.2f}) {title} | 股價變動：{price_change}")
-            for p,w,n in res.hits:
-                print(f"   {'+' if w>0 else '-'} {p}（{n}）")
-        news_with_scores = [(f"{t} 股價變動：{pc}", res.score*weight) for _,_,t,res,weight,pc in top_news]
-        avg_score = sum(s for _,s in news_with_scores)/len(news_with_scores)
-        divergence_note = detect_divergence(avg_score, top_news)
-        summary = groq_analyze(news_with_scores, target, avg_score, divergence_note)
-        fname = f"result_{today.strftime('%Y%m%d')}.txt"
-        with open(fname,"a",encoding="utf-8") as f:
-            f.write(f"======= {target} =======\n")
-            for docid,key,title,res,weight,price_change in top_news:
-                hits_text = "\n".join([f"  {'+' if w>0 else '-'} {p}（{n}）" for p,w,n in res.hits])
-                f.write(f"[{docid}#{key}]（{weight:.2f}x）\n標題：{first_n_sentences(title)}\n股價變動：{price_change}\n命中：\n{hits_text}\n\n")
-            f.write(f"★ 背離判斷：{divergence_note}\n")
-            f.write(f"下個預測股價走勢：{summary}\n\n")
-        print(summary+"\n")
+    return news_list
 
-    # Firestore 寫回
-    try:
-        db.collection(result_field).document(today.strftime("%Y%m%d")).set({
-            "timestamp": datetime.now(TAIWAN_TZ).isoformat(),
-            "result": summary,
-        })
-    except Exception as e:
-        print(f"[warning] Firestore 寫回失敗：{e}")
 
-# ---------- 主程式 ----------
-def main():
-    if not SILENT_MODE:
-        print("🚀 開始分析：光寶科（2301）...\n")
-    db = get_db()
-    analyze_target(db, NEWS_COLLECTION_LITE, "光寶科", RESULT_COLLECTION_LITE)
+# =============================
+# Firestore 儲存
+# =============================
+def save_news(news_list):
+    doc_id = datetime.now().strftime("%Y%m%d")
+    ref = db.collection("NEWS_LiteOn").document(doc_id)
 
+    data = {}
+    for i, n in enumerate(news_list, 1):
+        data[f"news_{i}"] = {
+            "title": n["title"],
+            "content": n["content"],
+            "source": n["source"],
+            "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M"),
+            "sentiment": n["ai"].get("sentiment") if n.get("ai") else None,
+            "score": n["ai"].get("score") if n.get("ai") else None,
+            "event": n["ai"].get("event") if n.get("ai") else None,
+            "reason": n["ai"].get("reason") if n.get("ai") else None
+        }
+
+    ref.set(data)
+    print(f"✅ 已存入 Firestore：NEWS_LiteOn/{doc_id}")
+
+
+# =============================
+# 主程式
+# =============================
 if __name__ == "__main__":
-    main()
+    yahoo_news = fetch_yahoo_news()
+    cnyes_news = fetch_cnyes_news()
+
+    all_news = yahoo_news + cnyes_news
+
+    print(f"🔍 共抓到 {len(all_news)} 則光寶科相關新聞（3 天內）")
+
+    if all_news:
+        save_news(all_news)
+
+    print("🎉 光寶科新聞抓取 + Groq 分析完成！")
