@@ -7,3 +7,4 @@ regex==2024.11.6
 rich==14.1.0
 firebase-admin>=6.0.0
 selenium>=4.10.0
+feedparser==6.0.10
