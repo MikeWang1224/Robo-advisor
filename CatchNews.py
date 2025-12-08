@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-liteon_news_google15.py
+liteon_news_yahoo15.py
 
-- 只抓最近兩天內的光寶科新聞
+- 只抓最近兩天內的光寶科新聞（Yahoo 新聞）
 - 最多 15 則
 - 使用 Base64 金鑰 NEW_FIREBASE_KEY_B64 初始化 Firestore
 - 時間判斷使用 UTC
@@ -54,11 +54,11 @@ def is_recent(published_dt):
     published_utc = published_dt.replace(tzinfo=timezone.utc)
     return published_utc >= now_utc - timedelta(days=2)
 
-# ---------- Google News RSS ----------
-def fetch_google_news_liteon(limit=15):
+# ---------- Yahoo News RSS ----------
+def fetch_yahoo_news_liteon(limit=15):
     news = []
-    # 使用 when:2d 參數只抓最近兩天新聞
-    rss_url = "https://news.google.com/rss/search?q=光寶科+when:2d&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    # Yahoo 新聞搜尋 RSS，q=光寶科
+    rss_url = "https://tw.news.yahoo.com/rss/tag/2301"
 
     try:
         feed = feedparser.parse(rss_url)
@@ -93,7 +93,7 @@ def fetch_google_news_liteon(limit=15):
             news.append({
                 "title": title,
                 "content": content,
-                "source": "Google News",
+                "source": "Yahoo News",
                 "published_time": published_time
             })
 
@@ -121,8 +121,8 @@ def save_to_firestore(news_list):
 
 # ---------- 主程式 ----------
 def main():
-    print("▶ 正在抓取光寶科新聞（最多 15 則，最近兩天內）...")
-    news_list = fetch_google_news_liteon(limit=15)
+    print("▶ 正在抓取光寶科 Yahoo 新聞（最多 15 則，最近兩天內）...")
+    news_list = fetch_yahoo_news_liteon(limit=15)
 
     if not news_list:
         print("⚠ 沒抓到資料")
