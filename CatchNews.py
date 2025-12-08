@@ -2,9 +2,8 @@
 """
 liteon_news_google15.py
 
-限制：
-- Google News RSS 抓取最多 15 則（最終存入 Firestore 的也是最多 15 則）
-- 僅保存 title / content / published_time / source
+- 以 entry.published ("2025-10-27 07:00:00") 判斷兩天內
+- 最終最多 15 則
 """
 
 import os
@@ -23,7 +22,6 @@ db = firestore.client()
 
 # ---------- 公用函式 ----------
 def fetch_article(url, max_len=2000):
-    """抓取文章全文"""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -35,17 +33,39 @@ def fetch_article(url, max_len=2000):
         return "(抓取失敗)"
 
 def contains_keyword(text):
-    """判斷是否含光寶科關鍵字"""
     keywords = ["光寶科", "光寶", "2301"]
     return any(k in text for k in keywords)
 
-def is_recent(published_time_str):
-    """是否在兩天內"""
+def parse_published_time(published_str):
+    """
+    Google News RSS 的 published 通常是 RFC822，例如:
+    'Mon, 27 Oct 2025 07:00:00 GMT'
+    """
     try:
-        dt = datetime.strptime(published_time_str, "%Y-%m-%d %H:%M:%S")
-        return dt >= datetime.now() - timedelta(days=2)
+        # feedparser 自己會幫忙解析 RFC822
+        dt = datetime(*feedparser.parse("x").entries)  # placeholder (避免誤導)
+
     except:
+        dt = None
+
+    # 嘗試常見格式
+    try:
+        # feedparser entry.published_parsed 可直接使用
+        return datetime(*published_str)
+    except:
+        pass
+
+    # 救援方案：若是 "2025-10-27 07:00:00" 這種格式
+    try:
+        return datetime.strptime(published_str, "%Y-%m-%d %H:%M:%S")
+    except:
+        return None
+
+def is_recent(published_dt):
+    """published_dt 是 datetime 物件"""
+    if not published_dt:
         return False
+    return published_dt >= (datetime.now() - timedelta(days=2))
 
 # ---------- Google News RSS ----------
 def fetch_google_news_liteon(limit=15):
@@ -54,25 +74,37 @@ def fetch_google_news_liteon(limit=15):
 
     try:
         feed = feedparser.parse(rss_url)
-        for entry in feed.entries[:limit]:  # RSS 最多只抓 15
+
+        for entry in feed.entries[:limit]:
+
+            # -------- 解析 published_time --------
+            published_raw = entry.get("published", "")
+            published_dt = None
+
+            # Google News 通常自帶 published_parsed → 最準確
+            if entry.get("published_parsed"):
+                published_dt = datetime(*entry.published_parsed[:6])
+            else:
+                # 如果你有提供 "2025-10-27 07:00:00"，走此段
+                try:
+                    published_dt = datetime.strptime(published_raw, "%Y-%m-%d %H:%M:%S")
+                except:
+                    published_dt = None
+
+            # 時間過濾（僅使用 published_time）
+            if not is_recent(published_dt):
+                continue
+
+            # -------- 標題 / 連結 / 內容 --------
             title = entry.get("title", "")
             link = entry.get("link", "")
-
-            # 文章內容
             content = fetch_article(link)
 
             # 關鍵字過濾
             if not contains_keyword(title) and not contains_keyword(content):
                 continue
 
-            # 時間檢查
-            if entry.get("published_parsed"):
-                published_time = datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                published_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            if not is_recent(published_time):
-                continue
+            published_time = published_dt.strftime("%Y-%m-%d %H:%M:%S")
 
             news.append({
                 "title": title,
@@ -81,7 +113,7 @@ def fetch_google_news_liteon(limit=15):
                 "published_time": published_time
             })
 
-            # **最終限制：不能超過 15 則**
+            # 最終限制：最多 15 則
             if len(news) >= limit:
                 break
 
