@@ -55,6 +55,7 @@ jobs:
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/firebase_key.json
           NEW_FIREBASE_KEY: ${{ secrets.NEW_FIREBASE_KEY_B64 }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           mkdir -p results
           today=$(date +'%Y%m%d')
