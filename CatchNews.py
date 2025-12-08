@@ -2,7 +2,7 @@
 """
 liteon_news_google15.py
 
-- 以 entry.published ("2025-10-27 07:00:00") 判斷兩天內
+- 以 entry.published 判斷兩天內
 - 最終最多 15 則
 - 使用 Base64 金鑰 NEW_FIREBASE_KEY_B64 初始化 Firestore
 """
