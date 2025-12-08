@@ -1,2 +1,4 @@
 📡 正在抓取 Yahoo 股市 — 光寶科新聞 (2301.TW)…
-[Error] API 抓取錯誤：400 Client Error: Bad Request for url: https://tw.stock.yahoo.com/_td-stock/api/resource/StockLatestNewsService;limit=100;symbols=2301.TW
+[Error] API 抓取錯誤：400 Client Error: Bad Request for url: https://tw.stock.yahoo.com/_td-stock/api/resource/StockLatestNewsService;url=%7B%22symbols%22%3A%20%5B%222301.TW%22%5D%2C%20%22limit%22%3A%2050%7D
+❗ URL： https://tw.stock.yahoo.com/_td-stock/api/resource/StockLatestNewsService;url=%7B%22symbols%22%3A%20%5B%222301.TW%22%5D%2C%20%22limit%22%3A%2050%7D
+⚠️ 沒有新聞可寫入 Firestore
