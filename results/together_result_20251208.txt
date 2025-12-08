@@ -1,12 +1,20 @@
 
-📡 Yahoo 搜尋強化版
+📡 Yahoo 強化抓取中...
 
-🔍 關鍵字：光寶科
+🔍 Yahoo 搜尋關鍵字：光寶科
 
-🔍 關鍵字：光寶
+🔍 Yahoo 搜尋關鍵字：光寶
 
-🔍 關鍵字：2301
+🔍 Yahoo 搜尋關鍵字：2301
+
+📡 TechNews 強化抓取中...
+
+🔍 TechNews 搜尋關鍵字：光寶科
+
+🔍 TechNews 搜尋關鍵字：光寶
+
+🔍 TechNews 搜尋關鍵字：2301
 🔥 Firestore 已寫入 → NEWS_LiteOn/20251208
 📦 共 1 則新聞
 
-🎉 Yahoo 新聞抓取完成（強化版）！
+🎉 Yahoo + TechNews 新聞抓取完成！
