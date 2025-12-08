@@ -4,7 +4,8 @@
 條件：
 ✔ 3 天內（72 小時）
 ✔ 標題或內文 只要提到光寶科/光寶/2301 就算一則
-✔ Yahoo + 鉅亨網
+✔ Yahoo 支援翻頁、多種 selector
+✔ 鉅亨網 keyword 搜尋
 """
 
 import os
@@ -52,23 +53,31 @@ def contains_keyword(title, content):
 
 
 # =============================
-#  Yahoo 新聞
+#  Yahoo 新聞（強化抓取）
 # =============================
-def fetch_yahoo_news(limit=40):
+def fetch_yahoo_news(limit=80, pages=4):
     print("📡 抓取 Yahoo 新聞")
     base = "https://tw.news.yahoo.com"
-    url = f"{base}/search?p=光寶科&sort=time"
+    
+    news_list = []
+    seen = set()
 
-    news_list, seen = [], set()
-
-    try:
+    for page in range(1, pages + 1):
+        url = f"https://tw.news.search.yahoo.com/search?p=光寶科&b={(page-1)*10+1}"
         r = requests.get(url, headers=HEADERS)
         soup = BeautifulSoup(r.text, 'html.parser')
-        links = soup.select('a.js-content-viewer') or soup.select('h3 a')
 
-        for a in links:
+        # Yahoo 搜尋結果常見 selector
+        candidates = (
+            soup.select("a.js-content-viewer") +
+            soup.select("h3 a") +
+            soup.select("a.d-ib") +
+            soup.select("a[data-ylk]")
+        )
+
+        for a in candidates:
             if len(news_list) >= limit:
-                break
+                return news_list
 
             title = a.get_text(strip=True)
             if not title or title in seen:
@@ -76,17 +85,19 @@ def fetch_yahoo_news(limit=40):
             seen.add(title)
 
             href = a.get("href")
-            if href and not href.startswith("http"):
+            if not href:
+                continue
+            if href.startswith("/"):
                 href = base + href
 
-            # 文章內容
+            # 抓詳細內文
             content = fetch_article_content(href)
 
-            # 沒關鍵字就略過
+            # 標題或內文有提到 → 才算
             if not contains_keyword(title, content):
                 continue
 
-            # 解析發布時間
+            # 解析時間
             try:
                 r2 = requests.get(href, headers=HEADERS)
                 s2 = BeautifulSoup(r2.text, 'html.parser')
@@ -112,9 +123,6 @@ def fetch_yahoo_news(limit=40):
                 "source": "Yahoo"
             })
 
-    except Exception as e:
-        print("Yahoo 抓取錯誤：", e)
-
     return news_list
 
 
@@ -132,13 +140,11 @@ def fetch_cnyes_news(limit=40):
         try:
             url = f"https://api.cnyes.com/media/api/v1/search/list?keyword={kw}&limit=50"
             r = requests.get(url, headers=HEADERS, timeout=10)
-            data = r.json()
-
-            items = data.get("items", {}).get("data", [])
+            items = r.json().get("items", {}).get("data", [])
 
             for item in items:
                 if len(news_list) >= limit:
-                    break
+                    return news_list
 
                 title = item.get("title", "")
                 if not title or title in seen:
@@ -156,7 +162,6 @@ def fetch_cnyes_news(limit=40):
                 article_url = f"https://news.cnyes.com/news/id/{item.get('newsId')}?exp=a"
                 content = fetch_article_content(article_url)
 
-                # 標題或內文提到即可
                 if not contains_keyword(title, content):
                     continue
 
@@ -166,9 +171,6 @@ def fetch_cnyes_news(limit=40):
                     "published_time": published_dt,
                     "source": "鉅亨網"
                 })
-
-            if news_list:
-                break
 
         except Exception as e:
             print("鉅亨網抓取錯誤：", e)
