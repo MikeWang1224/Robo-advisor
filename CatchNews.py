@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-liteon_news_google15.py
+CatchNews.py
 
-- 以 entry.published 判斷兩天內
-- 最終最多 15 則
-- 使用 Base64 金鑰 NEW_FIREBASE_KEY_B64 初始化 Firestore
+功能：
+- 抓取光寶科 (2301) 最近兩天新聞
+- Google News RSS 每次最多抓 15 則
+- 只儲存 title + content + published_time + source
+- 使用 workflow 提供的 Base64 金鑰 NEW_FIREBASE_KEY 初始化 Firestore
 """
 
 import os
@@ -18,10 +20,10 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
 
-# ---------- Firestore 初始化（使用 Base64 金鑰 NEW_FIREBASE_KEY_B64） ----------
-key_b64 = os.environ.get("NEW_FIREBASE_KEY_B64")
+# ---------- Firestore 初始化（使用 Base64 金鑰 NEW_FIREBASE_KEY） ----------
+key_b64 = os.environ.get("NEW_FIREBASE_KEY")
 if not key_b64:
-    raise ValueError("❌ 找不到 NEW_FIREBASE_KEY_B64 環境變數")
+    raise ValueError("❌ 找不到 NEW_FIREBASE_KEY 環境變數")
 
 key_json = base64.b64decode(key_b64)
 cred = credentials.Certificate(json.loads(key_json))
@@ -30,6 +32,7 @@ db = firestore.client()
 
 # ---------- 公用函式 ----------
 def fetch_article(url, max_len=2000):
+    """抓取文章全文"""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -41,6 +44,7 @@ def fetch_article(url, max_len=2000):
         return "(抓取失敗)"
 
 def contains_keyword(text):
+    """判斷是否含光寶科關鍵字"""
     keywords = ["光寶科", "光寶", "2301"]
     return any(k in text for k in keywords)
 
