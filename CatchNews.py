@@ -1,15 +1,33 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo 主站搜尋版 + 鉅亨網）
-✔ 100% 可抓得到（不依賴 Yahoo 股票頁）
+光寶科新聞抓取 + Firestore 寫入
+✔ Yahoo 搜尋頁（保證抓到）
+✔ 鉅亨網搜尋
+✔ 只存 3 天內
+✔ 寫入 Firestore：NEWS_LiteOn / YYYYMMDD
 """
 
+import os
 import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+import firebase_admin
+from firebase_admin import credentials, firestore
 
+
+# -----------------------------
+# Firestore 初始化
+# -----------------------------
+if not firebase_admin._apps:
+    cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+COLL_NAME = "NEWS_LiteOn"  # Firestore collection name
 KEYWORDS = ["光寶科", "光寶", "2301"]
-MAX_HOURS = 72  # 只抓三天內
+MAX_HOURS = 72  # 三天內
+
 
 def in_range(dt):
     """判斷是否在 72 小時之內"""
@@ -17,7 +35,7 @@ def in_range(dt):
 
 
 # ----------------------------------------------------------
-# ★ Yahoo 搜尋頁 (最穩、最不容易壞)
+# ★ Yahoo 搜尋頁 — 最穩定，不會被改版
 # ----------------------------------------------------------
 def fetch_yahoo_search():
     print("📡 正在抓取 Yahoo 搜尋頁…")
@@ -29,8 +47,7 @@ def fetch_yahoo_search():
 
     results = []
 
-    items = soup.select("div.NewsArticle")  # 主站搜尋固定使用這個 class
-
+    items = soup.select("div.NewsArticle")
     for n in items:
         title_tag = n.select_one("h4 > a")
         if not title_tag:
@@ -39,15 +56,14 @@ def fetch_yahoo_search():
         title = title_tag.get_text(strip=True)
         link = title_tag["href"]
 
-        # 判斷是否包含關鍵字
+        # 關鍵字過濾
         if not any(k in title for k in KEYWORDS):
             continue
 
-        # --- 抓時間 (X 天前 / X 小時前) ---
+        # 時間：x 小時前 / x 天前
         time_tag = n.select_one("span.s-time")
         if time_tag:
-            txt = time_tag.get_text(strip=True)
-            publish_time = parse_relative_time(txt)
+            publish_time = parse_relative_time(time_tag.get_text(strip=True))
         else:
             publish_time = datetime.now()
 
@@ -57,7 +73,8 @@ def fetch_yahoo_search():
         results.append({
             "title": title,
             "link": link,
-            "time": publish_time.strftime("%Y-%m-%d %H:%M")
+            "time": publish_time.strftime("%Y-%m-%d %H:%M"),
+            "source": "Yahoo"
         })
 
     print(f"✔ Yahoo 搜尋抓到 {len(results)} 則")
@@ -65,7 +82,7 @@ def fetch_yahoo_search():
 
 
 def parse_relative_time(text):
-    """解析 Yahoo 的「xx 小時前 / xx 天前」格式"""
+    """解析 Yahoo 的相對時間"""
     now = datetime.now()
     try:
         if "分鐘" in text:
@@ -83,7 +100,7 @@ def parse_relative_time(text):
 
 
 # ----------------------------------------------------------
-# 鉅亨網（搜尋）
+# ★ 鉅亨網搜尋
 # ----------------------------------------------------------
 def fetch_cnyes():
     print("📡 正在抓取 鉅亨網…")
@@ -96,7 +113,6 @@ def fetch_cnyes():
     results = []
 
     items = soup.select("a._1Zdp")
-
     for n in items:
         title = n.get_text(strip=True)
         link = "https://news.cnyes.com" + n.get("href", "")
@@ -105,7 +121,8 @@ def fetch_cnyes():
             results.append({
                 "title": title,
                 "link": link,
-                "time": "N/A"
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "source": "Cnyes"
             })
 
     print(f"✔ 鉅亨網抓到 {len(results)} 則")
@@ -113,21 +130,34 @@ def fetch_cnyes():
 
 
 # ----------------------------------------------------------
-# 主整合流程
+# ★ Firestore 寫入
 # ----------------------------------------------------------
-def fetch_all():
+def write_to_firestore(news_list):
+    today = datetime.now().strftime("%Y%m%d")
+    doc_ref = db.collection(COLL_NAME).document(today)
+
+    # 寫入欄位：news_list = [...]
+    doc_ref.set({"news_list": news_list}, merge=True)
+
+    print(f"🔥 已寫入 Firestore → /{COLL_NAME}/{today}")
+    print(f"📦 共 {len(news_list)} 則新聞")
+
+
+# ----------------------------------------------------------
+# ★ 主流程
+# ----------------------------------------------------------
+def main():
     yahoo = fetch_yahoo_search()
     cnyes = fetch_cnyes()
 
     all_news = yahoo + cnyes
 
     if not all_news:
-        print("⚠️ 仍然沒有新聞（不太可能）")
-    else:
-        print(f"📦 共抓到 {len(all_news)} 則新聞")
+        print("⚠️ 沒有新聞可寫入 Firestore")
+        return
 
-    return all_news
+    write_to_firestore(all_news)
 
 
 if __name__ == "__main__":
-    fetch_all()
+    main()
