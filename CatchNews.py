@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 # ----- Firestore 初始化（用 JSON 內容） -----
-service_account_info = json.loads(os.environ["GROQ_API_KEY"])
+service_account_info = json.loads(os.environ["NEW_FIREBASE_KEY"])
 cred = credentials.Certificate(service_account_info)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
