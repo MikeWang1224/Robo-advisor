@@ -1,235 +1,628 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo + TechNews 強化版）
-✔ 多關鍵字：光寶科 / 光寶 / 2301
-✔ Yahoo 抓多頁 + 新舊版支援
-✔ TechNews 多頁解析
-✔ 抓新聞全文
-✔ 時間過濾：36 小時內
-✔ 寫入 Firestore（不存股價）
+光寶科新聞抓取（方案 C：全財經網站掃描）
+來源：Yahoo, TechNews, 鉅亨(Cnyes), MoneyDJ, ETToday, UDN (聯合報)
+功能：
+ - 只抓關鍵字：光寶科 / 光寶 / 2301
+ - 抓新聞全文
+ - 時間過濾：36 小時內
+ - Firestore 寫法：NEWS_LiteOn / YYYYMMDD / articles -> 每篇一個 doc
+ - Firestore meta：NEWS_LiteOn / YYYYMMDD / meta -> 總數 + 時間
+注意：
+ - 需環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 Firebase service account JSON
+ - 建議安裝 python-dateutil：pip install python-dateutil
 """
-
 import os
 import time
+import hashlib
+import logging
 import requests
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+
+# optional: better date parsing
+try:
+    from dateutil import parser as dateparser
+except Exception:
+    dateparser = None
+
+# Firestore
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# -----------------------------
-# Firestore 初始化
-# -----------------------------
-if not firebase_admin._apps:
-    cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
-    firebase_admin.initialize_app(cred)
-
-db = firestore.client()
+# ---------------- Config ----------------
 COLL_NAME = "NEWS_LiteOn"
-KEYWORDS = ["光寶科", "光寶", "2301"]  # 多關鍵字
+KEYWORDS = ["光寶科", "光寶", "2301"]
 MAX_HOURS = 36
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/117.0.0.0 Safari/537.36"
+}
+REQUEST_TIMEOUT = 12
+MAX_RETRIES = 2
+SLEEP_BETWEEN_REQ = 0.4
 
-# -----------------------------
-# 時間過濾
-# -----------------------------
-def is_recent(dt):
-    return (datetime.now(timezone.utc) - dt).total_seconds() <= MAX_HOURS * 3600
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
+# ---------------- Firestore init ----------------
+if not firebase_admin._apps:
+    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not cred_path:
+        logging.error("請先設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向你的 Firebase key JSON 檔案")
+        raise SystemExit("Missing GOOGLE_APPLICATION_CREDENTIALS")
+    cred = credentials.Certificate(cred_path)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-# -----------------------------
-# Yahoo 強化抓取
-# -----------------------------
-def fetch_yahoo(limit_each=30):
-    print("\n📡 Yahoo 強化抓取中...")
+# ---------------- Helpers ----------------
+session = requests.Session()
+session.headers.update(HEADERS)
 
-    base = "https://tw.news.yahoo.com"
-    all_news, seen_links = [], set()
-
-    for keyword in KEYWORDS:
-        print(f"\n🔍 Yahoo 搜尋關鍵字：{keyword}")
-
-        for page in range(1, 4):  # 抓 3 頁
-            url = f"{base}/search?p={keyword}&sort=time&b={(page-1)*10+1}"
-
-            try:
-                r = requests.get(url, headers=HEADERS, timeout=10)
-                soup = BeautifulSoup(r.text, "html.parser")
-
-                # 新版 Yahoo
-                links = soup.select("a.js-content-viewer")
-
-                # 舊版 Yahoo
-                if not links:
-                    links = soup.select("h3 a")
-
-                for a in links:
-                    href = a.get("href")
-                    if not href:
-                        continue
-
-                    if not href.startswith("http"):
-                        href = base + href
-
-                    if href in seen_links:
-                        continue
-                    seen_links.add(href)
-
-                    # 抓全文
-                    try:
-                        r2 = requests.get(href, headers=HEADERS, timeout=10)
-                        s2 = BeautifulSoup(r2.text, "html.parser")
-
-                        title = s2.find("h1")
-                        if not title:
-                            continue
-                        title = title.get_text(strip=True)
-
-                        paras = s2.select("article p") or s2.select("p")
-                        content = "\n".join(
-                            p.get_text(strip=True)
-                            for p in paras
-                            if len(p.get_text(strip=True)) > 40
-                        )[:1500]
-
-                        # 時間
-                        time_tag = s2.find("time")
-                        if not time_tag or not time_tag.has_attr("datetime"):
-                            continue
-
-                        published_dt = datetime.fromisoformat(
-                            time_tag["datetime"].replace("Z", "+00:00")
-                        )
-                        if not is_recent(published_dt):
-                            continue
-
-                        all_news.append({
-                            "title": title,
-                            "content": content,
-                            "time": published_dt.strftime("%Y-%m-%d %H:%M"),
-                            "source": "Yahoo"
-                        })
-
-                        time.sleep(0.3)
-
-                    except:
-                        continue
-
-            except:
-                continue
-
-    return all_news
-
-
-# -----------------------------
-# TechNews 強化抓取
-# -----------------------------
-def fetch_technews(limit_pages=3):
-    print("\n📡 TechNews 強化抓取中...")
-
-    base = "https://technews.tw"
-    all_news, seen_links = [], set()
-
-    for keyword in KEYWORDS:
-        print(f"\n🔍 TechNews 搜尋關鍵字：{keyword}")
-        url = f"https://technews.tw/google-search/?googlekeyword={keyword}"
-
+def safe_get(url):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            soup = BeautifulSoup(r.text, "html.parser")
+            r = session.get(url, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            logging.debug(f"GET {url} fail attempt {attempt}: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(0.5 * attempt)
+            else:
+                return None
 
-            raw_links = soup.find_all("a", href=True)
-            links = []
+def clean_text(s):
+    return re.sub(r'\s+', ' ', s).strip() if s else ""
 
-            for a in raw_links:
-                href = a["href"]
-                if href.startswith(base) and "/tag/" not in href:
-                    if href not in links:
-                        links.append(href)
+def now_utc():
+    return datetime.now(timezone.utc)
 
-            links = links[:50]  # 避免抓太多
-
-        except:
+def parse_datetime_fuzzy(s):
+    # try dateutil first
+    if not s:
+        raise ValueError("empty")
+    s = s.strip()
+    if dateparser:
+        try:
+            dt = dateparser.parse(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+    # try ISO fallback
+    try:
+        iso = re.sub(r'(\.\d+)?Z$', '+00:00', s)
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    # try common formats
+    formats = ["%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
+    for f in formats:
+        try:
+            dt = datetime.strptime(s, f)
+            dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
             continue
+    raise ValueError("unparsed datetime: " + s)
 
-        # 抓每篇文章
-        for link in links:
-            if link in seen_links:
+def is_recent(dt):
+    # accept timezone-aware dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now_utc() - dt).total_seconds() <= MAX_HOURS * 3600
+
+def contains_keyword(text):
+    if not text:
+        return False
+    txt = text.lower()
+    for k in KEYWORDS:
+        if k.lower() in txt:
+            return True
+    return False
+
+def doc_id_from_url(url):
+    h = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return h
+
+# ---------------- Source: Yahoo (multi-page + multi-keywords) ----------------
+def fetch_yahoo(keywords=None, pages=3, per_page_limit=40):
+    if keywords is None:
+        keywords = KEYWORDS
+    base = "https://tw.news.yahoo.com"
+    results = []
+    seen_urls = set()
+    logging.info("📡 Yahoo 抓取開始")
+    for kw in keywords:
+        for page in range(1, pages+1):
+            b = (page-1)*10 + 1
+            url = f"{base}/search?p={requests.utils.requote_uri(kw)}&sort=time&b={b}"
+            r = safe_get(url)
+            if not r:
                 continue
-            seen_links.add(link)
-
-            try:
-                r2 = requests.get(link, headers=HEADERS, timeout=10)
+            s = BeautifulSoup(r.text, "html.parser")
+            # try selectors
+            link_candidates = s.select("a.js-content-viewer") or s.select("h3 a") or s.select("a[href*='/news/']")
+            for a in link_candidates:
+                href = a.get("href") or a.get("data-href")
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = base + href
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                # fetch article
+                time.sleep(SLEEP_BETWEEN_REQ)
+                r2 = safe_get(href)
+                if not r2:
+                    continue
                 s2 = BeautifulSoup(r2.text, "html.parser")
-
+                # title
                 title_tag = s2.find("h1")
-                if not title_tag:
+                title = clean_text(title_tag.get_text()) if title_tag else ""
+                # time
+                dt = None
+                time_tag = s2.find("time")
+                if time_tag and time_tag.has_attr("datetime"):
+                    try:
+                        dt = parse_datetime_fuzzy(time_tag["datetime"])
+                    except Exception:
+                        try:
+                            dt = parse_datetime_fuzzy(time_tag.get_text(strip=True))
+                        except Exception:
+                            dt = None
+                if not dt:
+                    # fallback meta
+                    meta = s2.find("meta", {"property": "article:published_time"}) or s2.find("meta", {"name":"ptime"})
+                    if meta and meta.get("content"):
+                        try:
+                            dt = parse_datetime_fuzzy(meta["content"])
+                        except Exception:
+                            dt = None
+                if not dt or not is_recent(dt):
                     continue
-                title = title_tag.get_text(strip=True)
-
-                time_tag = s2.find("time", class_="entry-date")
-                if not time_tag:
+                # content
+                paras = s2.select("article p") or s2.select('div[class*="article"] p') or s2.select("p")
+                content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
+                if not content:
                     continue
-
-                published_dt = datetime.strptime(
-                    time_tag.get_text(strip=True), "%Y/%m/%d %H:%M"
-                ).replace(tzinfo=timezone.utc)
-
-                if not is_recent(published_dt):
+                # keyword check
+                if not contains_keyword(title + " " + content):
                     continue
-
-                paras = s2.select("article p") or s2.select("p")
-                content = "\n".join(
-                    p.get_text(strip=True)
-                    for p in paras
-                    if len(p.get_text(strip=True)) > 40
-                )[:1500]
-
-                all_news.append({
+                results.append({
                     "title": title,
-                    "content": content,
-                    "time": published_dt.strftime("%Y-%m-%d %H:%M"),
-                    "source": "TechNews"
+                    "content": content[:2500],
+                    "time": dt.isoformat(),
+                    "source": "Yahoo",
+                    "url": href
                 })
+                if len(results) >= per_page_limit:
+                    break
+            if len(results) >= per_page_limit:
+                break
+    logging.info(f"Yahoo 完成，取得 {len(results)} 篇")
+    return results
 
-                time.sleep(0.3)
-
-            except:
+# ---------------- Source: TechNews ----------------
+def fetch_technews(keywords=None, page_limit=2, per_source_limit=40):
+    if keywords is None:
+        keywords = KEYWORDS
+    base = "https://technews.tw"
+    results = []
+    seen = set()
+    logging.info("📡 TechNews 抓取開始")
+    # TechNews 提供搜尋 page: use /page/1/?s=keyword
+    for kw in keywords:
+        url = f"{base}/page/1/?s={requests.utils.requote_uri(kw)}"
+        r = safe_get(url)
+        if not r:
+            continue
+        s = BeautifulSoup(r.text, "html.parser")
+        cards = s.select("article.post a") or s.select("h2.entry-title a")
+        links = []
+        for a in cards:
+            href = a.get("href")
+            if href and href.startswith(base):
+                if href not in links:
+                    links.append(href)
+        for link in links[:per_source_limit]:
+            if link in seen:
                 continue
+            seen.add(link)
+            time.sleep(SLEEP_BETWEEN_REQ)
+            r2 = safe_get(link)
+            if not r2:
+                continue
+            s2 = BeautifulSoup(r2.text, "html.parser")
+            title_tag = s2.find("h1") or s2.select_one(".entry-title")
+            title = clean_text(title_tag.get_text()) if title_tag else ""
+            time_tag = s2.find("time", class_="entry-date")
+            if not time_tag:
+                continue
+            try:
+                dt = parse_datetime_fuzzy(time_tag.get_text(strip=True))
+            except Exception:
+                continue
+            if not is_recent(dt):
+                continue
+            paras = s2.select("article p") or s2.select("p")
+            content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
+            if not content:
+                continue
+            if not contains_keyword(title + " " + content):
+                continue
+            results.append({
+                "title": title,
+                "content": content[:2500],
+                "time": dt.isoformat(),
+                "source": "TechNews",
+                "url": link
+            })
+    logging.info(f"TechNews 完成，取得 {len(results)} 篇")
+    return results
 
-    return all_news
+# ---------------- Source: 鉅亨 (Cnyes) ----------------
+def fetch_cnyes(keywords=None, page_limit=2, per_source_limit=40):
+    if keywords is None:
+        keywords = KEYWORDS
+    base = "https://news.cnyes.com"
+    results = []
+    seen = set()
+    logging.info("📡 Cnyes 抓取開始")
+    # Cnyes has search: /search/site?q=keyword or /search/?q=
+    for kw in keywords:
+        url = f"https://news.cnyes.com/search?q={requests.utils.requote_uri(kw)}"
+        r = safe_get(url)
+        if not r:
+            continue
+        s = BeautifulSoup(r.text, "html.parser")
+        # find article links
+        anchors = s.select("a[href*='/articles/']") + s.select("a[href*='/news/']")
+        links = []
+        for a in anchors:
+            href = a.get("href")
+            if href and href.startswith("/"):
+                href = base + href
+            if href and href.startswith(base) and href not in links:
+                links.append(href)
+        for link in links[:per_source_limit]:
+            if link in seen:
+                continue
+            seen.add(link)
+            time.sleep(SLEEP_BETWEEN_REQ)
+            r2 = safe_get(link)
+            if not r2:
+                continue
+            s2 = BeautifulSoup(r2.text, "html.parser")
+            title_tag = s2.find("h1")
+            title = clean_text(title_tag.get_text()) if title_tag else ""
+            # cnyes often has meta time
+            dt = None
+            meta = s2.find("meta", {"property":"article:published_time"}) or s2.find("time")
+            if meta:
+                try:
+                    content = meta.get("content") if meta.get("content") else meta.get_text()
+                    dt = parse_datetime_fuzzy(content)
+                except Exception:
+                    dt = None
+            if not dt:
+                continue
+            if not is_recent(dt):
+                continue
+            paras = s2.select("article p") or s2.select("div.article-body p") or s2.select("p")
+            content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
+            if not content:
+                continue
+            if not contains_keyword(title + " " + content):
+                continue
+            results.append({
+                "title": title,
+                "content": content[:2500],
+                "time": dt.isoformat(),
+                "source": "Cnyes",
+                "url": link
+            })
+    logging.info(f"Cnyes 完成，取得 {len(results)} 篇")
+    return results
 
+# ---------------- Source: MoneyDJ ----------------
+def fetch_moneydj(keywords=None, per_source_limit=40):
+    if keywords is None:
+        keywords = KEYWORDS
+    results = []
+    seen = set()
+    base_search = "https://www.moneydj.com/KMDJ/Search/Search"
+    logging.info("📡 MoneyDJ 抓取開始")
+    for kw in keywords:
+        # MoneyDJ 的搜尋為 POST 或 query params; 嘗試簡單 query
+        url = f"https://www.moneydj.com/KMDJ/News/NewsSearch.aspx?KeyWord={requests.utils.requote_uri(kw)}"
+        r = safe_get(url)
+        if not r:
+            continue
+        s = BeautifulSoup(r.text, "html.parser")
+        anchors = s.select("a[href*='/News/News']") + s.select("a[href*='/News/']")
+        links = []
+        for a in anchors:
+            href = a.get("href")
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = "https://www.moneydj.com" + href
+            if href not in links:
+                links.append(href)
+        for link in links[:per_source_limit]:
+            if link in seen:
+                continue
+            seen.add(link)
+            time.sleep(SLEEP_BETWEEN_REQ)
+            r2 = safe_get(link)
+            if not r2:
+                continue
+            s2 = BeautifulSoup(r2.text, "html.parser")
+            title_tag = s2.find("h1") or s2.find("h2")
+            title = clean_text(title_tag.get_text()) if title_tag else ""
+            # parse time from page: MoneyDJ sometimes uses <span class="date">
+            dt = None
+            ttag = s2.find(lambda tag: tag.name in ["time","span"] and ("發佈" in tag.get_text() or ":" in tag.get_text()))
+            if ttag and ttag.get("datetime"):
+                try:
+                    dt = parse_datetime_fuzzy(ttag.get("datetime"))
+                except:
+                    pass
+            if not dt:
+                # try regex in text
+                txt = s2.get_text()
+                m = re.search(r'(\d{4}/\d{2}/\d{2}\s*\d{2}:\d{2})', txt)
+                if m:
+                    try:
+                        dt = parse_datetime_fuzzy(m.group(1))
+                    except:
+                        dt = None
+            if not dt or not is_recent(dt):
+                continue
+            paras = s2.select("article p") or s2.select("div[class*='Content'] p") or s2.select("p")
+            content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
+            if not content:
+                continue
+            if not contains_keyword(title + " " + content):
+                continue
+            results.append({
+                "title": title,
+                "content": content[:2500],
+                "time": dt.isoformat(),
+                "source": "MoneyDJ",
+                "url": link
+            })
+    logging.info(f"MoneyDJ 完成，取得 {len(results)} 篇")
+    return results
 
-# -----------------------------
-# Firestore 寫入
-# -----------------------------
-def save_news(news_list):
-    if not news_list:
-        print("⚠️ 沒有新聞可寫入")
+# ---------------- Source: ETToday ----------------
+def fetch_ettoday(limit_pages=2, per_source_limit=40):
+    results = []
+    seen = set()
+    logging.info("📡 ETToday 抓取開始")
+    # ETToday 財經分類代碼通常是 2003；也可以用站內搜尋
+    for page in range(1, limit_pages+1):
+        url = f"https://www.ettoday.net/news/news-list-2003-{page}.htm"
+        r = safe_get(url)
+        if not r:
+            continue
+        s = BeautifulSoup(r.text, "html.parser")
+        list_items = s.select(".piece-box a") or s.select(".col-12 a") or s.select(".story a")
+        links = []
+        for a in list_items:
+            href = a.get("href")
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = "https://www.ettoday.net" + href
+            if href not in links:
+                links.append(href)
+        for link in links:
+            if link in seen:
+                continue
+            seen.add(link)
+            time.sleep(SLEEP_BETWEEN_REQ)
+            r2 = safe_get(link)
+            if not r2:
+                continue
+            s2 = BeautifulSoup(r2.text, "html.parser")
+            title_tag = s2.find("h1") or s2.find("h2")
+            title = clean_text(title_tag.get_text()) if title_tag else ""
+            # time: span class "date"
+            dt = None
+            ttag = s2.find("time") or s2.find("span", class_="date") or s2.find("span", class_=re.compile("date|time"))
+            if ttag and ttag.get("datetime"):
+                try:
+                    dt = parse_datetime_fuzzy(ttag.get("datetime"))
+                except:
+                    pass
+            if not dt:
+                # fallback parse from text
+                txt = s2.get_text()
+                m = re.search(r'(\d{4}/\d{2}/\d{2}\s*\d{2}:\d{2})', txt)
+                if m:
+                    try:
+                        dt = parse_datetime_fuzzy(m.group(1))
+                    except:
+                        dt = None
+            if not dt or not is_recent(dt):
+                continue
+            paras = s2.select("article p") or s2.select(".story p") or s2.select("p")
+            content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
+            if not content:
+                continue
+            if not contains_keyword(title + " " + content):
+                continue
+            results.append({
+                "title": title,
+                "content": content[:2500],
+                "time": dt.isoformat(),
+                "source": "ETToday",
+                "url": link
+            })
+            if len(results) >= per_source_limit:
+                break
+    logging.info(f"ETToday 完成，取得 {len(results)} 篇")
+    return results
+
+# ---------------- Source: UDN (聯合報) ----------------
+def fetch_udn(keywords=None, per_source_limit=40):
+    if keywords is None:
+        keywords = KEYWORDS
+    results = []
+    seen = set()
+    logging.info("📡 UDN 抓取開始")
+    for kw in keywords:
+        url = f"https://search.udn.com/search/result.jsp?key={requests.utils.requote_uri(kw)}"
+        r = safe_get(url)
+        if not r:
+            continue
+        s = BeautifulSoup(r.text, "html.parser")
+        anchors = s.select(".search_list_3 a") + s.select(".serchlist a") + s.select("a")
+        links = []
+        for a in anchors:
+            href = a.get("href")
+            if not href:
+                continue
+            if href.startswith("/"):
+                href = "https://udn.com" + href
+            if "udn.com" in href and href not in links:
+                links.append(href)
+        for link in links[:per_source_limit]:
+            if link in seen:
+                continue
+            seen.add(link)
+            time.sleep(SLEEP_BETWEEN_REQ)
+            r2 = safe_get(link)
+            if not r2:
+                continue
+            s2 = BeautifulSoup(r2.text, "html.parser")
+            title_tag = s2.find("h1")
+            title = clean_text(title_tag.get_text()) if title_tag else ""
+            dt = None
+            meta = s2.find("meta", {"property":"article:published_time"})
+            if meta and meta.get("content"):
+                try:
+                    dt = parse_datetime_fuzzy(meta["content"])
+                except:
+                    dt = None
+            if not dt:
+                # find typical string like 2025-12-08 12:34
+                txt = s2.get_text()
+                m = re.search(r'(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2})', txt)
+                if m:
+                    try:
+                        dt = parse_datetime_fuzzy(m.group(1))
+                    except:
+                        dt = None
+            if not dt or not is_recent(dt):
+                continue
+            paras = s2.select("article p") or s2.select("section p") or s2.select("p")
+            content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
+            if not content:
+                continue
+            if not contains_keyword(title + " " + content):
+                continue
+            results.append({
+                "title": title,
+                "content": content[:2500],
+                "time": dt.isoformat(),
+                "source": "UDN",
+                "url": link
+            })
+            if len(results) >= per_source_limit:
+                break
+    logging.info(f"UDN 完成，取得 {len(results)} 篇")
+    return results
+
+# ---------------- Save to Firestore ----------------
+def save_to_firestore(article_list):
+    if not article_list:
+        logging.info("沒有文章要寫入 Firestore")
         return
+    date_key = datetime.now().strftime("%Y%m%d")
+    base_doc = db.collection(COLL_NAME).document(date_key)
+    articles_col = base_doc.collection("articles")
+    # write each article as its own doc using hash of url as id
+    added = 0
+    for art in article_list:
+        uid = doc_id_from_url(art.get("url","") or art.get("title","") + str(art.get("time","")))
+        try:
+            # upsert: 如果 doc 已存在就跳過（避免重複）
+            doc_ref = articles_col.document(uid)
+            if doc_ref.get().exists:
+                continue
+            doc_ref.set({
+                "title": art.get("title"),
+                "content": art.get("content"),
+                "time": art.get("time"),
+                "source": art.get("source"),
+                "url": art.get("url"),
+                "fetched_at": now_utc().isoformat()
+            })
+            added += 1
+        except Exception as e:
+            logging.warning(f"寫入單篇失敗: {e}")
+    # write meta
+    try:
+        base_doc.collection("meta").document("summary").set({
+            "date": date_key,
+            "total_fetched": len(article_list),
+            "added": added,
+            "updated_at": now_utc().isoformat()
+        })
+    except Exception as e:
+        logging.warning(f"寫入 meta 失敗: {e}")
+    logging.info(f"Firestore 已寫入：新增 {added} 篇（總抓取 {len(article_list)} 篇）")
 
-    today = datetime.now().strftime("%Y%m%d")
-    ref = db.collection(COLL_NAME).document(today)
+# ---------------- Main ----------------
+def main():
+    logging.info("開始抓取（方案 C：全財經網站掃描）")
+    all_articles = []
+    try:
+        all_articles += fetch_yahoo(KEYWORDS, pages=3, per_page_limit=60)
+    except Exception as e:
+        logging.warning(f"Yahoo 抓取錯誤: {e}")
+    try:
+        all_articles += fetch_technews(KEYWORDS, page_limit=2, per_source_limit=30)
+    except Exception as e:
+        logging.warning(f"TechNews 抓取錯誤: {e}")
+    try:
+        all_articles += fetch_cnyes(KEYWORDS, page_limit=2, per_source_limit=40)
+    except Exception as e:
+        logging.warning(f"Cnyes 抓取錯誤: {e}")
+    try:
+        all_articles += fetch_moneydj(KEYWORDS, per_source_limit=30)
+    except Exception as e:
+        logging.warning(f"MoneyDJ 抓取錯誤: {e}")
+    try:
+        all_articles += fetch_ettoday(limit_pages=3, per_source_limit=40)
+    except Exception as e:
+        logging.warning(f"ETToday 抓取錯誤: {e}")
+    try:
+        all_articles += fetch_udn(KEYWORDS, per_source_limit=30)
+    except Exception as e:
+        logging.warning(f"UDN 抓取錯誤: {e}")
 
-    data = {}
-    for i, n in enumerate(news_list, 1):
-        data[f"news_{i}"] = n
+    # 去重（以 url 為主鍵，沒有 url 則用 title+time）
+    unique = {}
+    for a in all_articles:
+        key = a.get("url") or (a.get("title","") + a.get("time",""))
+        if key not in unique:
+            unique[key] = a
+    deduped = list(unique.values())
+    logging.info(f"抓取完成，共取得 {len(all_articles)} 篇，去重後 {len(deduped)} 篇")
 
-    ref.set(data)
-    print(f"🔥 Firestore 已寫入 → {COLL_NAME}/{today}")
-    print(f"📦 共 {len(news_list)} 則新聞")
+    save_to_firestore(deduped)
+    logging.info("結束。")
 
-
-# -----------------------------
-# 主程式
-# -----------------------------
 if __name__ == "__main__":
-    all_news = []
-
-    # Yahoo + TechNews
-    all_news += fetch_yahoo()
-    all_news += fetch_technews()
-
-    save_news(all_news)
-
-    print("\n🎉 Yahoo + TechNews 新聞抓取完成！")
+    main()
