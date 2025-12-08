@@ -6,6 +6,7 @@
 ✔ 標題或內文 只要提到光寶科/光寶/2301 就算一則
 ✔ Yahoo 支援翻頁、多種 selector
 ✔ 鉅亨網 keyword 搜尋
+✔ 每次存入前清空 Firestore 文件
 """
 
 import os
@@ -179,12 +180,16 @@ def fetch_cnyes_news(limit=40):
 
 
 # =============================
-# Firestore 儲存
+# Firestore 儲存（先清空再寫入）
 # =============================
 def save_news(news_list):
     doc_id = datetime.now().strftime("%Y%m%d")
     ref = db.collection("NEWS_LiteOn").document(doc_id)
 
+    # 先清空整個 document
+    ref.delete()
+
+    # 準備資料
     data = {}
     for i, n in enumerate(news_list, 1):
         data[f"news_{i}"] = {
@@ -194,8 +199,9 @@ def save_news(news_list):
             "source": n["source"]
         }
 
+    # 寫入 Firestore
     ref.set(data)
-    print(f"✅ 已存入 Firestore：NEWS_LiteOn/{doc_id}")
+    print(f"✅ 已清空並存入 Firestore：NEWS_LiteOn/{doc_id}")
 
 
 # =============================
