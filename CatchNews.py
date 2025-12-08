@@ -6,8 +6,8 @@
 
 import os
 import time
-import json 
-import requests  
+import json
+import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import warnings
@@ -97,7 +97,8 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
             news_list.append({
                 "title": title,
                 "content": content,
-                "published_time": published_dt
+                "published_time": published_dt,
+                "source": "Yahoo"
             })
 
     except:
@@ -135,13 +136,13 @@ def fetch_cnyes_news(keyword="光寶科", limit=30):
                 continue
 
             article_url = f"https://news.cnyes.com/news/id/{item.get('newsId')}?exp=a"
-
             content = fetch_article_content(article_url)
 
             news_list.append({
                 "title": title,
                 "content": content,
-                "published_time": published_dt
+                "published_time": published_dt,
+                "source": "鉅亨網"
             })
 
     except Exception as e:
@@ -162,7 +163,8 @@ def save_news(news_list):
         data[f"news_{i}"] = {
             "title": n["title"],
             "content": n["content"],
-            "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M")
+            "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M"),
+            "source": n["source"]
         }
 
     ref.set(data)
