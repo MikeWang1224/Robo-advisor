@@ -1,134 +1,140 @@
 # -*- coding: utf-8 -*-
 """
-Yahoo 股市 — 光寶科新聞抓取（2301.TW）
-✔ 不用 API（避免 Yahoo 400）
-✔ 直接抓取 quote 頁面 embedded JSON
-✔ 過濾 72 小時內新聞
-✔ 自動寫入 Firestore /NEWS_LiteOn/{YYYYMMDD}
+光寶科新聞抓取（Yahoo + 鉅亨網）
+修復：Yahoo JSON 結構變動 → 自動 fallback 到 HTML 解析
 """
 
-import os
-import re
-import json
 import requests
 from datetime import datetime, timedelta
-import firebase_admin
-from firebase_admin import credentials, firestore
+from bs4 import BeautifulSoup
+
+TARGET = ["光寶科", "光寶", "2301"]
+MAX_HOURS = 72  # 只抓 3 天內的新聞
+
+def in_range(publish_time):
+    """判斷是否在 72 小時內"""
+    now = datetime.now()
+    return (now - publish_time).total_seconds() <= MAX_HOURS * 3600
+
+def fetch_yahoo_json():
+    """新版 Yahoo JSON 抓取"""
+    try:
+        url = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockNewsListService.newsList?symbol=2301.TW"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        data = requests.get(url, headers=headers, timeout=10).json()
+
+        # JSON 新版格式 → data["data"]["list"]
+        news_list = data.get("data", {}).get("list", [])
+        results = []
+
+        for n in news_list:
+            title = n.get("title", "")
+            link = "https://tw.stock.yahoo.com" + n.get("link", "")
+            ts = n.get("pubDate", 0) / 1000  # 13-digit timestamp
+            publish_time = datetime.fromtimestamp(ts)
+
+            if any(k in title for k in TARGET) and in_range(publish_time):
+                results.append({
+                    "title": title,
+                    "link": link,
+                    "time": publish_time.strftime("%Y-%m-%d %H:%M")
+                })
+
+        return results
+
+    except Exception:
+        return None  # 代表 JSON 解析失敗
 
 
-# -----------------------------
-# Firebase 初始化
-# -----------------------------
-cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
-firebase_admin.initialize_app(cred)
-db = firestore.client()
-
-
-# -----------------------------
-# 主抓取函式：解析 Yahoo quote embedded JSON
-# -----------------------------
-def fetch_liteon_news():
-    print("📡 正在抓取 Yahoo 股市 — 光寶科新聞 (2301.TW)…")
-
+def fetch_yahoo_html():
+    """Yahoo HTML 版本備援解析"""
     url = "https://tw.stock.yahoo.com/quote/2301.TW/news"
     headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        print("[Error] 抓取 HTML 失敗：", e)
-        return []
-
-    html = r.text
-
-    # -----------------------------
-    # 抓 embedded JSON
-    # -----------------------------
-    # Yahoo 網頁中會有 window.YAHOO.context = {...}
-    match = re.search(r'root\.App\.main = ({.*?});', html)
-    if not match:
-        print("❗ 找不到 Yahoo embedded JSON")
-        return []
-
-    try:
-        data = json.loads(match.group(1))
-    except:
-        print("❗ Yahoo JSON 解析失敗")
-        return []
-
-    # -----------------------------
-    # 找新聞資料的位置
-    # -----------------------------
-    try:
-        news_items = (
-            data["context"]["dispatcher"]["stores"]["QuoteNewsStore"]["newsList"]["2301.TW"]
-        )
-    except:
-        print("❗ 找不到新聞項目")
-        return []
-
-    now = datetime.now()
-    three_days_ago = now - timedelta(days=3)
-
+    blocks = soup.select("li.js-stream-content")
     results = []
 
-    for item in news_items:
-        title = item.get("title", "")
-        summary = item.get("summary", "")
-        link = "https://tw.stock.yahoo.com" + item.get("link", "")
-        pub_ts = item.get("publisherTime", 0)  # 毫秒
-        pub_time = datetime.fromtimestamp(pub_ts / 1000)
+    for b in blocks:
+        title = b.select_one("h3").get_text(strip=True)
+        link = "https://tw.stock.yahoo.com" + b.select_one("a")["href"]
 
-        # 72 小時內
-        if pub_time < three_days_ago:
-            continue
+        # 擷取日期
+        time_text = b.select_one("span").get_text(strip=True)
+        try:
+            if "天" in time_text:
+                hours_ago = int(time_text.replace("天前", "")) * 24
+                publish_time = datetime.now() - timedelta(hours=hours_ago)
+            elif "小時" in time_text:
+                hours_ago = int(time_text.replace("小時前", ""))
+                publish_time = datetime.now() - timedelta(hours=hours_ago)
+            else:
+                publish_time = datetime.now()
+        except:
+            publish_time = datetime.now()
 
-        # 關鍵字
-        if not any(k in (title + summary) for k in ["光寶", "光寶科", "2301"]):
-            continue
+        if any(k in title for k in TARGET) and in_range(publish_time):
+            results.append({
+                "title": title,
+                "link": link,
+                "time": publish_time.strftime("%Y-%m-%d %H:%M")
+            })
 
-        results.append({
-            "title": title,
-            "summary": summary,
-            "link": link,
-            "pub_time": pub_time
-        })
-
-    print(f"🔍 共抓到 {len(results)} 則光寶科股市新聞（3 天內）")
-    print("🎉 光寶科股市新聞抓取完成！")
     return results
 
 
-# -----------------------------
-# Firestore 寫入
-# -----------------------------
-def save_news_to_firestore(news_list):
-    if not news_list:
+def fetch_chinatimes():
+    """抓取鉅亨網"""
+    url = "https://news.cnyes.com/search?keyword=光寶科"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    results = []
+    blocks = soup.select("a._1Zdp")
+
+    for b in blocks:
+        title = b.get_text(strip=True)
+        link = "https://news.cnyes.com" + b["href"]
+
+        # 無法直接抓時間 → 略過時間檢查
+        if any(k in title for k in TARGET):
+            results.append({
+                "title": title,
+                "link": link,
+                "time": "N/A"
+            })
+
+    return results
+
+
+def fetch_all():
+    print("📡 正在抓取 Yahoo 股市 — 光寶科新聞 (2301.TW)…")
+
+    yahoo_json = fetch_yahoo_json()
+
+    if yahoo_json is None:
+        print("❗ Yahoo JSON 解析失敗 → 改用 HTML 抓取…")
+        yahoo_data = fetch_yahoo_html()
+    else:
+        yahoo_data = yahoo_json
+
+    print(f"✔ Yahoo 取得 {len(yahoo_data)} 則")
+
+    print("📡 正在抓取 鉅亨網…")
+    cnyes = fetch_chinatimes()
+    print(f"✔ 鉅亨網 取得 {len(cnyes)} 則")
+
+    all_news = yahoo_data + cnyes
+
+    if not all_news:
         print("⚠️ 沒有新聞可寫入 Firestore")
-        return
+    else:
+        print(f"📦 共 {len(all_news)} 則新聞")
 
-    doc_id = datetime.now().strftime("%Y%m%d")
-    ref = db.collection("NEWS_LiteOn").document(doc_id)
-
-    data = {}
-
-    for i, n in enumerate(news_list, 1):
-        data[f"news_{i}"] = {
-            "title": n["title"],
-            "summary": n["summary"],
-            "link": n["link"],
-            "published_time": n["pub_time"].strftime("%Y-%m-%d %H:%M:%S"),
-            "source": "Yahoo 股市"
-        }
-
-    ref.set(data, merge=False)
-    print(f"✅ 已寫入 Firestore：/NEWS_LiteOn/{doc_id}")
+    return all_news
 
 
-# -----------------------------
-# 主程式
-# -----------------------------
 if __name__ == "__main__":
-    news = fetch_liteon_news()
-    save_news_to_firestore(news)
+    fetch_all()
