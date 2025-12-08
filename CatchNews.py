@@ -169,7 +169,8 @@ def fetch_cnyes_news(limit=40):
 # Firestore 儲存（清空舊資料）
 # =============================
 def save_news(news_list):
-    doc_id = datetime.now().strftime("%Y%m%d")  # 例如 20251208
+    # 測試用 document ID
+    doc_id = "111"
     ref = db.collection("NEWS_LiteOn").document(doc_id)
 
     data = {}
