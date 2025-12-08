@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-liteon_news_multi_source.py
+liteon_news_multi_source_selenium.py
 
 功能：
 - 抓取光寶科 (2301) 新聞
 - 來源：Yahoo 股市、鉅亨網、中時新聞網、工商時報、MoneyDJ、ETtoday、TechNews、Google News RSS
+- 使用 Selenium 抓取需要 JavaScript 的頁面
 - 只儲存 title + content + published_time + source
 - 不做 AI 分析，也不存 ai_analyzed / ai_error
 """
@@ -16,6 +17,9 @@ import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
 import feedparser
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -43,14 +47,22 @@ def contains_keyword(text):
     keywords = ["光寶科", "光寶", "2301"]
     return any(k in text for k in keywords)
 
+# ---------- Selenium 初始化 ----------
+def init_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    driver = webdriver.Chrome(options=chrome_options)
+    return driver
+
 # ---------- Yahoo 股市 ----------
-def fetch_yahoo_liteon():
-    url = "https://tw.stock.yahoo.com/quote/2301/news"
-    headers = {"User-Agent": "Mozilla/5.0"}
+def fetch_yahoo_liteon(driver):
     result = []
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
+        driver.get("https://tw.stock.yahoo.com/quote/2301/news")
+        time.sleep(3)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
         for a in soup.select("a.js-content-viewer"):
             title = a.get_text(strip=True)
             if not contains_keyword(title):
@@ -65,8 +77,8 @@ def fetch_yahoo_liteon():
                 "source": "Yahoo股市",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except:
-        pass
+    except Exception as e:
+        print("Yahoo股市抓取失敗:", e)
     return result
 
 # ---------- 鉅亨網 ----------
@@ -98,17 +110,18 @@ def fetch_cnyes_liteon(limit=50):
                     "source": "鉅亨網",
                     "published_time": published_time
                 })
-        except:
+        except Exception as e:
+            print("鉅亨網抓取失敗:", e)
             continue
     return result
 
 # ---------- 中時新聞網 ----------
-def fetch_chinatimes_liteon():
+def fetch_chinatimes_liteon(driver):
     result = []
     try:
-        url = "https://www.chinatimes.com/search/光寶科"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
+        driver.get("https://www.chinatimes.com/search/光寶科")
+        time.sleep(3)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
         articles = soup.select("div.articlebox h3 a")
         for a in articles:
             title = a.get_text(strip=True)
@@ -126,17 +139,17 @@ def fetch_chinatimes_liteon():
                 "source": "中時新聞網",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except:
-        pass
+    except Exception as e:
+        print("中時新聞抓取失敗:", e)
     return result
 
 # ---------- 工商時報 ----------
-def fetch_ct_liteon():
+def fetch_ct_liteon(driver):
     result = []
     try:
-        url = "https://ctee.com.tw/search/%E5%85%89%E5%AF%B6%E7%A7%91"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
+        driver.get("https://ctee.com.tw/search/%E5%85%89%E5%AF%B6%E7%A7%91")
+        time.sleep(3)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
         articles = soup.select("h3 a")
         for a in articles:
             title = a.get_text(strip=True)
@@ -154,8 +167,8 @@ def fetch_ct_liteon():
                 "source": "工商時報",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except:
-        pass
+    except Exception as e:
+        print("工商時報抓取失敗:", e)
     return result
 
 # ---------- MoneyDJ ----------
@@ -182,8 +195,8 @@ def fetch_moneydj_liteon():
                 "source": "MoneyDJ",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except:
-        pass
+    except Exception as e:
+        print("MoneyDJ抓取失敗:", e)
     return result
 
 # ---------- ETtoday 財經 ----------
@@ -210,8 +223,8 @@ def fetch_ettoday_liteon():
                 "source": "ETtoday",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except:
-        pass
+    except Exception as e:
+        print("ETtoday抓取失敗:", e)
     return result
 
 # ---------- TechNews ----------
@@ -236,8 +249,8 @@ def fetch_technews_liteon():
                 "source": "TechNews",
                 "published_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
-    except:
-        pass
+    except Exception as e:
+        print("TechNews抓取失敗:", e)
     return result
 
 # ---------- Google News RSS ----------
@@ -249,9 +262,7 @@ def fetch_google_news_liteon():
         for entry in feed.entries:
             title = entry.get("title", "")
             link = entry.get("link", "")
-            content = fetch_article(link)
-            if not contains_keyword(title) and not contains_keyword(content):
-                continue
+            content = title  # RSS 先用標題
             published_time = datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d %H:%M:%S") if entry.get("published_parsed") else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             result.append({
                 "title": title,
@@ -259,8 +270,8 @@ def fetch_google_news_liteon():
                 "source": "Google News",
                 "published_time": published_time
             })
-    except:
-        pass
+    except Exception as e:
+        print("Google News抓取失敗:", e)
     return result
 
 # ---------- 寫入 Firestore ----------
@@ -276,11 +287,13 @@ def save_to_firestore(news_list):
 # ---------- 主程式 ----------
 def main():
     print("▶ 正在抓取光寶科新聞...")
+    driver = init_driver()
     news_list = []
-    news_list.extend(fetch_yahoo_liteon())
+    news_list.extend(fetch_yahoo_liteon(driver))
     news_list.extend(fetch_cnyes_liteon())
-    news_list.extend(fetch_chinatimes_liteon())
-    news_list.extend(fetch_ct_liteon())
+    news_list.extend(fetch_chinatimes_liteon(driver))
+    news_list.extend(fetch_ct_liteon(driver))
+    driver.quit()
     news_list.extend(fetch_moneydj_liteon())
     news_list.extend(fetch_ettoday_liteon())
     news_list.extend(fetch_technews_liteon())
