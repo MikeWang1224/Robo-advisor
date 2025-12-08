@@ -1,28 +1,28 @@
 # -*- coding: utf-8 -*-
 """
-liteon_news_selenium.py
+liteon_news_selenium_full.py
 
 功能：
 - 抓取光寶科 (2301) 新聞
 - 來源：Yahoo 股市、中時新聞網、工商時報
 - 使用 Selenium 抓取動態生成頁面
 - 只儲存 title + content + published_time + source
-- 不做 AI 分析，也不存 ai_analyzed / ai_error 
+- 不做 AI 分析，也不存 ai_analyzed / ai_error
 """
 
 import os
 import re
 import time
 from datetime import datetime
-
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import requests
 import firebase_admin
 from firebase_admin import credentials, firestore
-import requests
 
 # ---------- Firestore 初始化 ----------
 cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
@@ -77,6 +77,7 @@ def init_driver():
     chrome_options.add_argument("--headless")  # 無頭模式
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     driver = webdriver.Chrome(options=chrome_options)
     return driver
 
@@ -85,7 +86,13 @@ def fetch_chinatimes_liteon(driver, max_news=20):
     result = []
     try:
         driver.get("https://www.chinatimes.com/search/光寶科")
-        time.sleep(3)
+        # 等待文章列表出現
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "div.articlebox h3 a"))
+        )
+        # 滾動到底部以載入更多文章
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         articles = soup.select("div.articlebox h3 a")
         for a in articles[:max_news]:
@@ -112,8 +119,12 @@ def fetch_chinatimes_liteon(driver, max_news=20):
 def fetch_ct_liteon(driver, max_news=20):
     result = []
     try:
-        driver.get("https://ctee.com.tw/search/%E5%85%89%E5%AF%B6%E7%A7%91")
-        time.sleep(3)
+        driver.get("https://ctee.com.tw/search/光寶科")
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "h3 a"))
+        )
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         articles = soup.select("h3 a")
         for a in articles[:max_news]:
@@ -150,8 +161,9 @@ def save_to_firestore(news_list):
 def main():
     print("▶ 正在抓取光寶科新聞...")
     news_list = []
+    # Yahoo
     news_list.extend(fetch_yahoo_liteon())
-
+    # Selenium
     driver = init_driver()
     news_list.extend(fetch_chinatimes_liteon(driver))
     news_list.extend(fetch_ct_liteon(driver))
