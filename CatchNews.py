@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 # Firestore 初始化
-cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+cred = credentials.Certificate(os.environ["GROQ_API_KEY"])
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
