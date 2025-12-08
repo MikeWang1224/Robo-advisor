@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Yahoo 股市 — 光寶科新聞抓取（2301.TW）
-使用 Yahoo JSON API，比 Selenium 穩定 100 倍
+✔ 使用可用的 StockLatestNewsService API
 ✔ 過濾 72 小時內
 ✔ 搜尋 title / summary 中是否包含 光寶 / 光寶科 / 2301
-✔ 可串 Firestore（依你需要）
 """
 
 import requests
@@ -13,10 +12,15 @@ from datetime import datetime, timedelta
 def fetch_liteon_yahoo_news():
     print("📡 正在抓取 Yahoo 股市 — 光寶科新聞 (2301.TW)…")
 
-    API_URL = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockNewsService;symbols=2301.TW"
+    API_URL = "https://tw.stock.yahoo.com/_td-stock/api/resource/StockLatestNewsService;limit=100;symbols=2301.TW"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
 
     try:
-        r = requests.get(API_URL, timeout=10)
+        r = requests.get(API_URL, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
