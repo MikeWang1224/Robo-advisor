@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo + 鉅亨網）
+光寶科新聞抓取（Yahoo 個股新聞 + 鉅亨網）
 只抓光寶科 + 36 小時內新聞  
 """
 
@@ -43,23 +43,28 @@ def fetch_article_content(url):
 
 
 # =============================
-#  Yahoo 新聞
+#  Yahoo 個股新聞（大量抓）
 # =============================
-def fetch_yahoo_news(keyword="光寶科", limit=30):
-    print(f"📡 Yahoo：{keyword}")
-    base = "https://tw.news.yahoo.com"
-    url = f"{base}/search?p={keyword}&sort=time"
+def fetch_yahoo_news_stock(symbol="2301", limit=50):
+    print(f"📡 Yahoo 個股新聞：{symbol}")
 
+    url = f"https://tw.stock.yahoo.com/quote/{symbol}/news"
     news_list, seen = [], set()
 
     try:
-        r = requests.get(url, headers=HEADERS)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        links = soup.select('a.js-content-viewer') or soup.select('h3 a')
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        for a in links:
+        # 個股新聞列表
+        cards = soup.select("ul[data-test-locator='stream-container'] li")
+
+        for card in cards:
             if len(news_list) >= limit:
                 break
+
+            a = card.find("a")
+            if not a:
+                continue
 
             title = a.get_text(strip=True)
             if not title or title in seen:
@@ -67,18 +72,15 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
             seen.add(title)
 
             href = a.get("href")
-            if href and not href.startswith("http"):
-                href = base + href
+            if href.startswith("/"):
+                href = "https://tw.stock.yahoo.com" + href
 
-            # 內容
-            content = fetch_article_content(href)
-
-            # 發布時間
+            # 再抓文章，看實際發布時間
             try:
-                r2 = requests.get(href, headers=HEADERS)
-                s2 = BeautifulSoup(r2.text, 'html.parser')
-                time_tag = s2.find("time")
+                r2 = requests.get(href, headers=HEADERS, timeout=10)
+                s2 = BeautifulSoup(r2.text, "html.parser")
 
+                time_tag = s2.find("time")
                 if not time_tag or not time_tag.has_attr("datetime"):
                     continue
 
@@ -89,30 +91,31 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
                 if not is_recent(published_dt):
                     continue
 
+                content = fetch_article_content(href)
+
+                news_list.append({
+                    "title": title,
+                    "content": content,
+                    "published_time": published_dt,
+                    "source": "Yahoo"
+                })
+
             except:
                 continue
 
-            news_list.append({
-                "title": title,
-                "content": content,
-                "published_time": published_dt,
-                "source": "Yahoo"
-            })
-
     except Exception as e:
-        print("Yahoo 抓取錯誤：", e)
+        print("Yahoo 個股新聞錯誤：", e)
 
     return news_list
 
 
 # =============================
-#  鉅亨網（修正 JSON 路徑 & fallback 關鍵字）
+#  鉅亨網（含 fallback 關鍵字）
 # =============================
 def fetch_cnyes_news(keyword="光寶科", limit=30):
     print(f"📡 鉅亨網：{keyword}")
 
-    # fallback 關鍵字
-    keywords = [keyword, "光寶", "2301"]
+    keywords = [keyword, "光寶", "2301"]  # fallback
 
     news_list = []
 
@@ -122,7 +125,6 @@ def fetch_cnyes_news(keyword="光寶科", limit=30):
             r = requests.get(url, headers=HEADERS, timeout=10)
             data = r.json()
 
-            # 正確 JSON 路徑
             items = data.get("items", {}).get("data", [])
 
             if not items:
@@ -157,7 +159,7 @@ def fetch_cnyes_news(keyword="光寶科", limit=30):
                 })
 
             if news_list:
-                break  # 已抓到就不用換 keyword
+                break
 
         except Exception as e:
             print("鉅亨網錯誤：", e)
@@ -189,7 +191,7 @@ def save_news(news_list):
 # 主程式
 # =============================
 if __name__ == "__main__":
-    yahoo_news = fetch_yahoo_news("光寶科", 30)
+    yahoo_news = fetch_yahoo_news_stock("2301", 50)
     cnyes_news = fetch_cnyes_news("光寶科", 30)
 
     all_news = yahoo_news + cnyes_news
@@ -197,4 +199,4 @@ if __name__ == "__main__":
     if all_news:
         save_news(all_news)
 
-    print("\n🎉 光寶科新聞抓取完成！（Yahoo + 鉅亨）")
+    print("\n🎉 光寶科（2301）新聞抓取完成！（Yahoo 個股新聞 + 鉅亨）")
