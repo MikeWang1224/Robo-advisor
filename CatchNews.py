@@ -20,7 +20,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ---------- Firestore 初始化（使用 Base64 金鑰 NEW_FIREBASE_KEY_B64） ----------
-key_b64 = os.environ.get("NEW_FIREBASE_KEY_B64")
+key_b64 = os.environ.get("NEW_FIREBASE_KEY")
 if not key_b64:
     raise ValueError("❌ 找不到 NEW_FIREBASE_KEY_B64 環境變數")
 
