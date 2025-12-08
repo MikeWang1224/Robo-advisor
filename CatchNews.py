@@ -7,7 +7,7 @@ liteon_news_selenium.py
 - 來源：Yahoo 股市、中時新聞網、工商時報
 - 使用 Selenium 抓取動態生成頁面
 - 只儲存 title + content + published_time + source
-- 不做 AI 分析，也不存 ai_analyzed / ai_error
+- 不做 AI 分析，也不存 ai_analyzed / ai_error 
 """
 
 import os
