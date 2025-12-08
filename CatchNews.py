@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-liteon_news_multi_source_limited.py
+liteon_news_google15.py
 
 功能：
 - 抓取光寶科 (2301) 最近兩天新聞
-- 每個來源最多抓 15 則
-- 來源：Yahoo 股市、鉅亨網、中時新聞網、工商時報、MoneyDJ、ETtoday、TechNews、Google News RSS
+- Google News RSS 每次最多抓 15 則
 - 只儲存 title + content + published_time + source
 - 不做 AI 分析，也不存 ai_analyzed / ai_error
 """
@@ -38,6 +37,7 @@ def fetch_article(url, max_len=2000):
         return "(抓取失敗)"
 
 def contains_keyword(text):
+    """判斷是否含光寶科關鍵字"""
     keywords = ["光寶科", "光寶", "2301"]
     return any(k in text for k in keywords)
 
@@ -49,70 +49,34 @@ def is_recent(published_time_str):
     except:
         return False
 
-# ---------- 每個來源抓取範例 ----------
-def fetch_yahoo_liteon(limit=15):
+# ---------- Google News RSS ----------
+def fetch_google_news_liteon(limit=15):
     result = []
     try:
-        url = "https://tw.stock.yahoo.com/quote/2301/news"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        for a in soup.select("a.js-content-viewer")[:limit]:
-            title = a.get_text(strip=True)
-            if not contains_keyword(title):
+        rss_url = "https://news.google.com/rss/search?q=光寶科&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        feed = feedparser.parse(rss_url)
+        count = 0
+        for entry in feed.entries:
+            if count >= limit:
+                break
+            title = entry.get("title", "")
+            link = entry.get("link", "")
+            content = fetch_article(link)
+            if not contains_keyword(title) and not contains_keyword(content):
                 continue
-            link = "https://tw.stock.yahoo.com" + a["href"]
-            published_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            published_time = datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d %H:%M:%S") if entry.get("published_parsed") else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if not is_recent(published_time):
                 continue
             result.append({
                 "title": title,
-                "content": fetch_article(link),
-                "source": "Yahoo股市",
+                "content": content,
+                "source": "Google News",
                 "published_time": published_time
             })
+            count += 1
     except:
         pass
     return result
-
-def fetch_cnyes_liteon(limit=15):
-    result = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-    keywords = ["光寶科", "光寶", "2301"]
-    count = 0
-    for kw in keywords:
-        if count >= limit:
-            break
-        try:
-            url = f"https://api.cnyes.com/media/api/v1/search/list?keyword={kw}&limit={limit}"
-            r = requests.get(url, headers=headers, timeout=10)
-            items = r.json().get("items", {}).get("data", [])
-            for item in items:
-                if count >= limit:
-                    break
-                title = item.get("title", "")
-                if not contains_keyword(title):
-                    continue
-                news_id = item.get("newsId")
-                if not news_id:
-                    continue
-                link = f"https://news.cnyes.com/news/id/{news_id}?exp=a"
-                timestamp = item.get("publishAt", 0)
-                published_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                if not is_recent(published_time):
-                    continue
-                result.append({
-                    "title": title,
-                    "content": fetch_article(link),
-                    "source": "鉅亨網",
-                    "published_time": published_time
-                })
-                count += 1
-        except:
-            continue
-    return result
-
-# 其他來源同理，只要在每個來源迴圈前加 `count` 控制 15 則，並用 is_recent 過濾最近兩天
 
 # ---------- 寫入 Firestore ----------
 def save_to_firestore(news_list):
@@ -126,11 +90,9 @@ def save_to_firestore(news_list):
 
 # ---------- 主程式 ----------
 def main():
-    print("▶ 正在抓取光寶科新聞...")
+    print("▶ 正在抓取光寶科新聞 (Google News 15則限制)...")
     news_list = []
-    news_list.extend(fetch_yahoo_liteon())
-    news_list.extend(fetch_cnyes_liteon())
-    # 可依需求把其他來源也加進來
+    news_list.extend(fetch_google_news_liteon(limit=15))
     if not news_list:
         print("⚠ 沒抓到資料")
         return
