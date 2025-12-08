@@ -3,7 +3,7 @@
 光寶科新聞抓取（Yahoo + 鉅亨網）
 條件：
 ✔ 3 天內（72 小時）
-✔ 標題或內文 只要提到光寶科/光寶/2301 就算一則
+✔ 標題或內文只要提到光寶科/光寶/2301就算一則
 ✔ Yahoo 支援翻頁、多種 selector
 ✔ 鉅亨網 keyword 搜尋
 ✔ 每次存入 Firestore 前覆蓋 document（清空舊資料）
@@ -38,7 +38,6 @@ def fetch_article_content(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, 'html.parser')
-
         paragraphs = soup.select('article p') or soup.select('p')
         text = "\n".join(p.get_text(strip=True) for p in paragraphs)
         return text[:1500] + ('...' if len(text) > 1500 else '')
@@ -59,7 +58,6 @@ def contains_keyword(title, content):
 def fetch_yahoo_news(limit=80, pages=4):
     print("📡 抓取 Yahoo 新聞")
     base = "https://tw.news.yahoo.com"
-    
     news_list = []
     seen = set()
 
@@ -68,7 +66,6 @@ def fetch_yahoo_news(limit=80, pages=4):
         r = requests.get(url, headers=HEADERS)
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # Yahoo 搜尋結果常見 selector
         candidates = (
             soup.select("a.js-content-viewer") +
             soup.select("h3 a") +
@@ -91,29 +88,21 @@ def fetch_yahoo_news(limit=80, pages=4):
             if href.startswith("/"):
                 href = base + href
 
-            # 抓詳細內文
             content = fetch_article_content(href)
-
-            # 標題或內文有提到 → 才算
             if not contains_keyword(title, content):
                 continue
 
-            # 解析時間
             try:
                 r2 = requests.get(href, headers=HEADERS)
                 s2 = BeautifulSoup(r2.text, 'html.parser')
                 time_tag = s2.find("time")
-
                 if not time_tag or not time_tag.has_attr("datetime"):
                     continue
-
                 published_dt = datetime.fromisoformat(
                     time_tag["datetime"].replace("Z", "+00:00")
                 ).astimezone()
-
                 if not is_recent(published_dt):
                     continue
-
             except:
                 continue
 
@@ -132,7 +121,6 @@ def fetch_yahoo_news(limit=80, pages=4):
 # =============================
 def fetch_cnyes_news(limit=40):
     print("📡 抓取 鉅亨網")
-
     keywords = ["光寶科", "光寶", "2301"]
     news_list = []
     seen = set()
@@ -162,7 +150,6 @@ def fetch_cnyes_news(limit=40):
 
                 article_url = f"https://news.cnyes.com/news/id/{item.get('newsId')}?exp=a"
                 content = fetch_article_content(article_url)
-
                 if not contains_keyword(title, content):
                     continue
 
@@ -172,7 +159,6 @@ def fetch_cnyes_news(limit=40):
                     "published_time": published_dt,
                     "source": "鉅亨網"
                 })
-
         except Exception as e:
             print("鉅亨網抓取錯誤：", e)
 
@@ -180,23 +166,22 @@ def fetch_cnyes_news(limit=40):
 
 
 # =============================
-# Firestore 儲存（覆蓋 document，清空舊資料）
+# Firestore 儲存（清空舊資料）
 # =============================
 def save_news(news_list):
     doc_id = datetime.now().strftime("%Y%m%d")  # 例如 20251208
     ref = db.collection("NEWS_LiteOn").document(doc_id)
 
-    # 準備資料
     data = {}
     for i, n in enumerate(news_list, 1):
         data[f"news_{i}"] = {
             "title": n["title"],
             "content": n["content"],
-            "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M"),
+            "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M:%S"),
             "source": n["source"]
         }
 
-    # 覆蓋整個 document（清空舊資料）
+    # 覆蓋整個 document → 清空舊資料
     ref.set(data, merge=False)
     print(f"✅ 已清空並存入 Firestore：NEWS_LiteOn/{doc_id}")
 
@@ -207,8 +192,10 @@ def save_news(news_list):
 if __name__ == "__main__":
     yahoo_news = fetch_yahoo_news()
     cnyes_news = fetch_cnyes_news()
-
     all_news = yahoo_news + cnyes_news
+
+    # 僅保留最近 72 小時的新聞（雙重保險）
+    all_news = [n for n in all_news if is_recent(n["published_time"])]
 
     print(f"🔍 共抓到 {len(all_news)} 則光寶科相關新聞（3 天內）")
 
