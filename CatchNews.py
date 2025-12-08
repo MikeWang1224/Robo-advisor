@@ -4,7 +4,7 @@ liteon_news_google15.py
 
 - 以 entry.published ("2025-10-27 07:00:00") 判斷兩天內
 - 最終最多 15 則
-- 支援 Base64 金鑰 NEW_FIREBASE_KEY_B64
+- 使用 Base64 金鑰 NEW_FIREBASE_KEY_B64 初始化 Firestore
 """
 
 import os
@@ -18,13 +18,13 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
 
-# ---------- Firestore 初始化（支援 Base64 金鑰） ----------
-if "NEW_FIREBASE_KEY_B64" in os.environ:
-    key_json = base64.b64decode(os.environ["NEW_FIREBASE_KEY_B64"])
-    cred = credentials.Certificate(json.loads(key_json))
-else:
-    cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+# ---------- Firestore 初始化（使用 Base64 金鑰 NEW_FIREBASE_KEY_B64） ----------
+key_b64 = os.environ.get("NEW_FIREBASE_KEY_B64")
+if not key_b64:
+    raise ValueError("❌ 找不到 NEW_FIREBASE_KEY_B64 環境變數")
 
+key_json = base64.b64decode(key_b64)
+cred = credentials.Certificate(json.loads(key_json))
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
