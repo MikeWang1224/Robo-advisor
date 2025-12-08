@@ -1,9 +1,6 @@
 
-📡 TechNews：光寶科
-
 📡 Yahoo：光寶科
+🔥 Firestore 已寫入 → NEWS_LiteOn/20251208
+📦 共 1 則新聞
 
-📡 CNBC：Lite-On
-⚠️ 沒有新聞可寫入
-
-🎉 全部新聞抓取完成！
+🎉 Yahoo 新聞抓取完成！
