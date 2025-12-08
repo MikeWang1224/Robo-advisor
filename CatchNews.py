@@ -1,24 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-光寶科新聞抓取（Yahoo + ETToday 財經全列表）
-功能：
- - 只抓關鍵字：光寶科 / 光寶 / 2301
- - 抓新聞全文
- - 時間過濾：36 小時內
- - Firestore 寫法：NEWS_LiteOn / YYYYMMDD / articles -> 每篇一個 doc
- - Firestore meta：NEWS_LiteOn / YYYYMMDD / meta -> 總數 + 時間
-注意：
- - 需環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 Firebase service account JSON
- - 建議安裝 python-dateutil：pip install python-dateutil
+Yahoo 財經新聞抓取（光寶科）
+只抓財報 / 法說 / 公司公告相關新聞
+時間過濾：36 小時內
+Firestore 存儲：NEWS_LiteOn / YYYYMMDD / articles -> 每篇一個 doc
 """
 import os
 import time
 import hashlib
 import logging
 import requests
-import re
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+import re
 
 # optional: better date parsing
 try:
@@ -33,6 +27,7 @@ from firebase_admin import credentials, firestore
 # ---------------- Config ----------------
 COLL_NAME = "NEWS_LiteOn"
 KEYWORDS = ["光寶科", "光寶", "2301"]
+FIN_KEYWORDS = ["財報", "法說", "季報", "公告"]
 MAX_HOURS = 36
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -49,7 +44,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 if not firebase_admin._apps:
     cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if not cred_path:
-        logging.error("請先設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向你的 Firebase key JSON 檔案")
+        logging.error("請先設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向你的 Firebase key JSON")
         raise SystemExit("Missing GOOGLE_APPLICATION_CREDENTIALS")
     cred = credentials.Certificate(cred_path)
     firebase_admin.initialize_app(cred)
@@ -60,17 +55,15 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 def safe_get(url):
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, MAX_RETRIES+1):
         try:
             r = session.get(url, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             return r
         except Exception as e:
             logging.debug(f"GET {url} fail attempt {attempt}: {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(0.5 * attempt)
-            else:
-                return None
+            time.sleep(0.5 * attempt)
+    return None
 
 def clean_text(s):
     return re.sub(r'\s+', ' ', s).strip() if s else ""
@@ -80,7 +73,7 @@ def now_utc():
 
 def parse_datetime_fuzzy(s):
     if not s:
-        raise ValueError("empty")
+        return None
     s = s.strip()
     if dateparser:
         try:
@@ -88,7 +81,7 @@ def parse_datetime_fuzzy(s):
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc)
-        except Exception:
+        except:
             pass
     try:
         iso = re.sub(r'(\.\d+)?Z$', '+00:00', s)
@@ -96,44 +89,45 @@ def parse_datetime_fuzzy(s):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
-    except Exception:
+    except:
         pass
     formats = ["%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
     for f in formats:
         try:
             dt = datetime.strptime(s, f)
             dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except Exception:
+            return dt.astimezone(timezone.utc)
+        except:
             continue
-    raise ValueError("unparsed datetime: " + s)
+    return None
 
 def is_recent(dt):
+    if dt is None:
+        return False
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return (now_utc() - dt).total_seconds() <= MAX_HOURS * 3600
+    return (now_utc() - dt).total_seconds() <= MAX_HOURS*3600
 
-def contains_keyword(text):
+def contains_keywords(text, keywords):
     if not text:
         return False
     txt = text.lower()
-    for k in KEYWORDS:
+    for k in keywords:
         if k.lower() in txt:
             return True
     return False
 
 def doc_id_from_url(url):
-    h = hashlib.sha1(url.encode("utf-8")).hexdigest()
-    return h
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()
 
-# ---------------- Source: Yahoo (multi-page + multi-keywords) ----------------
-def fetch_yahoo(keywords=None, pages=3, per_page_limit=60):
+# ---------------- Yahoo 財經抓取 ----------------
+def fetch_yahoo_financial(keywords=None, pages=3, per_page_limit=40):
     if keywords is None:
         keywords = KEYWORDS
     base = "https://tw.news.yahoo.com"
     results = []
     seen_urls = set()
-    logging.info("📡 Yahoo 抓取開始")
+    logging.info("📡 Yahoo 財經抓取開始")
     for kw in keywords:
         for page in range(1, pages+1):
             b = (page-1)*10 + 1
@@ -142,8 +136,8 @@ def fetch_yahoo(keywords=None, pages=3, per_page_limit=60):
             if not r:
                 continue
             s = BeautifulSoup(r.text, "html.parser")
-            link_candidates = s.select("a.js-content-viewer") or s.select("h3 a") or s.select("a[href*='/news/']")
-            for a in link_candidates:
+            links = s.select("a.js-content-viewer") or s.select("h3 a") or s.select("a[href*='/news/']")
+            for a in links:
                 href = a.get("href") or a.get("data-href")
                 if not href:
                     continue
@@ -152,6 +146,7 @@ def fetch_yahoo(keywords=None, pages=3, per_page_limit=60):
                 if href in seen_urls:
                     continue
                 seen_urls.add(href)
+                # 取得文章
                 time.sleep(SLEEP_BETWEEN_REQ)
                 r2 = safe_get(href)
                 if not r2:
@@ -162,27 +157,19 @@ def fetch_yahoo(keywords=None, pages=3, per_page_limit=60):
                 dt = None
                 time_tag = s2.find("time")
                 if time_tag and time_tag.has_attr("datetime"):
-                    try:
-                        dt = parse_datetime_fuzzy(time_tag["datetime"])
-                    except Exception:
-                        try:
-                            dt = parse_datetime_fuzzy(time_tag.get_text(strip=True))
-                        except Exception:
-                            dt = None
+                    dt = parse_datetime_fuzzy(time_tag["datetime"])
                 if not dt:
-                    meta = s2.find("meta", {"property": "article:published_time"}) or s2.find("meta", {"name":"ptime"})
+                    meta = s2.find("meta", {"property":"article:published_time"}) or s2.find("meta", {"name":"ptime"})
                     if meta and meta.get("content"):
-                        try:
-                            dt = parse_datetime_fuzzy(meta["content"])
-                        except Exception:
-                            dt = None
+                        dt = parse_datetime_fuzzy(meta.get("content"))
                 if not dt or not is_recent(dt):
                     continue
                 paras = s2.select("article p") or s2.select('div[class*="article"] p') or s2.select("p")
                 content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
                 if not content:
                     continue
-                if not contains_keyword(title + " " + content):
+                # 只抓財報 / 法說相關新聞
+                if not contains_keywords(title + " " + content, FIN_KEYWORDS):
                     continue
                 results.append({
                     "title": title,
@@ -196,73 +183,6 @@ def fetch_yahoo(keywords=None, pages=3, per_page_limit=60):
             if len(results) >= per_page_limit:
                 break
     logging.info(f"Yahoo 完成，取得 {len(results)} 篇")
-    return results
-
-# ---------------- Source: ETToday ----------------
-def fetch_ettoday(limit_pages=3, per_source_limit=40):
-    results = []
-    seen = set()
-    logging.info("📡 ETToday 抓取開始")
-    for page in range(1, limit_pages+1):
-        url = f"https://www.ettoday.net/news/news-list-2003-{page}.htm"
-        r = safe_get(url)
-        if not r:
-            continue
-        s = BeautifulSoup(r.text, "html.parser")
-        list_items = s.select(".piece-box a") or s.select(".col-12 a") or s.select(".story a")
-        links = []
-        for a in list_items:
-            href = a.get("href")
-            if not href:
-                continue
-            if href.startswith("/"):
-                href = "https://www.ettoday.net" + href
-            if href not in links:
-                links.append(href)
-        for link in links:
-            if link in seen:
-                continue
-            seen.add(link)
-            time.sleep(SLEEP_BETWEEN_REQ)
-            r2 = safe_get(link)
-            if not r2:
-                continue
-            s2 = BeautifulSoup(r2.text, "html.parser")
-            title_tag = s2.find("h1") or s2.find("h2")
-            title = clean_text(title_tag.get_text()) if title_tag else ""
-            dt = None
-            ttag = s2.find("time") or s2.find("span", class_="date") or s2.find("span", class_=re.compile("date|time"))
-            if ttag and ttag.get("datetime"):
-                try:
-                    dt = parse_datetime_fuzzy(ttag.get("datetime"))
-                except:
-                    pass
-            if not dt:
-                txt = s2.get_text()
-                m = re.search(r'(\d{4}/\d{2}/\d{2}\s*\d{2}:\d{2})', txt)
-                if m:
-                    try:
-                        dt = parse_datetime_fuzzy(m.group(1))
-                    except:
-                        dt = None
-            if not dt or not is_recent(dt):
-                continue
-            paras = s2.select("article p") or s2.select(".story p") or s2.select("p")
-            content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
-            if not content:
-                continue
-            if not contains_keyword(title + " " + content):
-                continue
-            results.append({
-                "title": title,
-                "content": content[:2500],
-                "time": dt.isoformat(),
-                "source": "ETToday",
-                "url": link
-            })
-            if len(results) >= per_source_limit:
-                break
-    logging.info(f"ETToday 完成，取得 {len(results)} 篇")
     return results
 
 # ---------------- Save to Firestore ----------------
@@ -304,28 +224,10 @@ def save_to_firestore(article_list):
 
 # ---------------- Main ----------------
 def main():
-    logging.info("開始抓取（Yahoo + ETToday 財經全列表）")
-    all_articles = []
-    try:
-        all_articles += fetch_yahoo(KEYWORDS, pages=3, per_page_limit=60)
-    except Exception as e:
-        logging.warning(f"Yahoo 抓取錯誤: {e}")
-    try:
-        all_articles += fetch_ettoday(limit_pages=3, per_source_limit=40)
-    except Exception as e:
-        logging.warning(f"ETToday 抓取錯誤: {e}")
-
-    # 去重
-    unique = {}
-    for a in all_articles:
-        key = a.get("url") or (a.get("title","") + a.get("time",""))
-        if key not in unique:
-            unique[key] = a
-    deduped = list(unique.values())
-    logging.info(f"抓取完成，共取得 {len(all_articles)} 篇，去重後 {len(deduped)} 篇")
-
-    save_to_firestore(deduped)
-    logging.info("結束。")
+    logging.info("開始抓取（Yahoo 財經光寶科財報新聞）")
+    all_articles = fetch_yahoo_financial(KEYWORDS, pages=5, per_page_limit=50)
+    save_to_firestore(all_articles)
+    logging.info("抓取完成。")
 
 if __name__ == "__main__":
     main()
