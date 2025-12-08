@@ -101,8 +101,8 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
                 "source": "Yahoo"
             })
 
-    except:
-        pass
+    except Exception as e:
+        print("Yahoo 抓取錯誤：", e)
 
     return news_list
 
@@ -112,41 +112,57 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
 # =============================
 def fetch_cnyes_news(keyword="光寶科", limit=30):
     print(f"📡 鉅亨網：{keyword}")
-    url = f"https://api.cnyes.com/media/api/v1/search/list?keyword={keyword}&limit=30"
+
+    # 問題解決：光寶科搜尋常常沒資料 → 自動 fallback
+    keywords = [keyword, "光寶", "2301"]
 
     news_list = []
 
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
+    for kw in keywords:
+        try:
+            url = f"https://api.cnyes.com/media/api/v1/search/list?keyword={kw}&limit=30"
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            data = r.json()
 
-        items = data.get("items", {}).get("data", [])
-        for item in items:
-            if len(news_list) >= limit:
+            # ⭐ 修正 JSON 路徑（你之前抓錯這裡，導致永遠為空）
+            items = data.get("data", {}).get("items", [])
+
+            if not items:
+                continue  # 換下一個 keyword
+
+            for item in items:
+                if len(news_list) >= limit:
+                    break
+
+                title = item.get("title", "")
+                if not title:
+                    continue
+
+                timestamp = item.get("publishAt", 0)
+                if timestamp == 0:
+                    continue
+
+                published_dt = datetime.fromtimestamp(timestamp).astimezone()
+
+                if not is_recent(published_dt):
+                    continue
+
+                article_url = f"https://news.cnyes.com/news/id/{item.get('newsId')}?exp=a"
+                content = fetch_article_content(article_url)
+
+                news_list.append({
+                    "title": title,
+                    "content": content,
+                    "published_time": published_dt,
+                    "source": "鉅亨網"
+                })
+
+            # 若這個 keyword 抓到資料，就不再換 keyword
+            if news_list:
                 break
 
-            title = item.get("title", "")
-            if not title:
-                continue
-
-            timestamp = item.get("publishAt", 0)
-            published_dt = datetime.fromtimestamp(timestamp).astimezone()
-
-            if not is_recent(published_dt):
-                continue
-
-            article_url = f"https://news.cnyes.com/news/id/{item.get('newsId')}?exp=a"
-            content = fetch_article_content(article_url)
-
-            news_list.append({
-                "title": title,
-                "content": content,
-                "published_time": published_dt,
-                "source": "鉅亨網"
-            })
-
-    except Exception as e:
-        print("鉅亨網錯誤：", e)
+        except Exception as e:
+            print("鉅亨網錯誤：", e)
 
     return news_list
 
