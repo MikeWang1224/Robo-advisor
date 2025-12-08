@@ -108,12 +108,12 @@ def fetch_yahoo_news(keyword="光寶科", limit=30):
 
 
 # =============================
-#  鉅亨網（cnyes.com）
+#  鉅亨網（正確 JSON 路徑版）
 # =============================
 def fetch_cnyes_news(keyword="光寶科", limit=30):
     print(f"📡 鉅亨網：{keyword}")
 
-    # 問題解決：光寶科搜尋常常沒資料 → 自動 fallback
+    # fallback 關鍵字
     keywords = [keyword, "光寶", "2301"]
 
     news_list = []
@@ -124,11 +124,12 @@ def fetch_cnyes_news(keyword="光寶科", limit=30):
             r = requests.get(url, headers=HEADERS, timeout=10)
             data = r.json()
 
-            # ⭐ 修正 JSON 路徑（你之前抓錯這裡，導致永遠為空）
-            items = data.get("data", {}).get("items", [])
+            # ⭐ 正確的 JSON 路徑
+            items = data.get("items", {}).get("data", [])
 
             if not items:
-                continue  # 換下一個 keyword
+                print(f"⚠ 鉅亨搜尋「{kw}」無資料")
+                continue
 
             for item in items:
                 if len(news_list) >= limit:
@@ -157,9 +158,8 @@ def fetch_cnyes_news(keyword="光寶科", limit=30):
                     "source": "鉅亨網"
                 })
 
-            # 若這個 keyword 抓到資料，就不再換 keyword
             if news_list:
-                break
+                break  # 已抓到就不用換 keyword
 
         except Exception as e:
             print("鉅亨網錯誤：", e)
