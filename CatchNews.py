@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Yahoo 財經新聞抓取（光寶科）
-只抓光寶科 → 不篩財報/法說/公告
-時間篩選：36 小時
-Firestore：NEWS_LiteOn / YYYYMMDD / articles
-本地：result.txt（不留空，也不寫 URL）
+改為可正常抓到新聞的新版爬蟲：
+→ Yahoo 搜尋頁現在改成 React，新聞列表存於 __NEXT_DATA__ JSON
+→ 用 requests + JSON 解析即可穩定取得結果
 """
 
 import os
@@ -14,6 +13,7 @@ import logging
 import requests
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
+import json
 import re
 
 try:
@@ -100,16 +100,16 @@ def doc_id_from_text(t):
     return hashlib.sha1(t.encode("utf-8")).hexdigest()
 
 
-# ---------------- Yahoo 抓全部光寶新聞 ----------------
+# ---------------- Yahoo 新版爬蟲（可正常抓新聞） ----------------
 def fetch_yahoo_all(keywords=None, pages=5):
     if keywords is None:
         keywords = KEYWORDS
 
     base = "https://tw.news.yahoo.com"
     results = []
-    seen = set()
+    seen_url = set()
 
-    logging.info("📡 Yahoo 搜尋（光寶科）開始…")
+    logging.info("📡 Yahoo 新版搜尋開始…")
 
     for kw in keywords:
         for page in range(1, pages + 1):
@@ -121,54 +121,53 @@ def fetch_yahoo_all(keywords=None, pages=5):
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
-            links = soup.select("a.js-content-viewer, h3 a, a[href*='/news/']")
 
-            for a in links:
-                href = a.get("href")
-                if not href:
-                    continue
-                if href.startswith("/"):
-                    href = base + href
-                if href in seen:
-                    continue
-                seen.add(href)
+            # 解析 __NEXT_DATA__（整個新聞列表都在這裡）
+            script_tag = soup.find("script", id="__NEXT_DATA__", type="application/json")
+            if not script_tag:
+                logging.warning("找不到 __NEXT_DATA__，Yahoo 搜尋頁已改版？")
+                continue
 
-                # 抓內頁
+            try:
+                data = json.loads(script_tag.string)
+                items = data["props"]["pageProps"]["initialState"]["search"]["news"]["items"]
+            except:
+                logging.warning("Yahoo 搜尋 JSON 結構不符")
+                continue
+
+            # 處理每一則新聞
+            for item in items:
+                link = item.get("link")
+                title = clean_text(item.get("title") or "")
+                pub = item.get("pubDate")
+
+                if not link or link in seen_url:
+                    continue
+                seen_url.add(link)
+
+                # 關鍵字過濾（光寶）
+                if not contains_keywords(title, ["光寶", "光寶科", "2301"]):
+                    continue
+
+                dt = parse_datetime_fuzzy(pub)
+                if not dt or not is_recent(dt):
+                    continue
+
+                # 抓內文
                 time.sleep(SLEEP_BETWEEN_REQ)
-                r2 = safe_get(href)
+                r2 = safe_get(link)
                 if not r2:
                     continue
 
                 s2 = BeautifulSoup(r2.text, "html.parser")
 
-                # 標題
-                h1 = s2.find("h1")
-                if not h1:
-                    continue
-                title = clean_text(h1.get_text())
-
-                # 必須包含光寶
-                if not contains_keywords(title, ["光寶", "光寶科", "2301"]):
-                    continue
-
-                # 時間
-                t = s2.find("time")
-                dt = None
-                if t and t.has_attr("datetime"):
-                    dt = parse_datetime_fuzzy(t["datetime"])
-
-                if not dt or not is_recent(dt):
-                    continue
-
-                # 內文
-                selectors = [
+                content = ""
+                for sel in [
                     "article p",
                     "div.caas-body p",
                     "div.caas-content p",
                     "div[class*='caas'] p"
-                ]
-                content = ""
-                for sel in selectors:
+                ]:
                     paras = s2.select(sel)
                     if paras:
                         text = "\n".join([clean_text(p.get_text()) for p in paras])
@@ -186,7 +185,7 @@ def fetch_yahoo_all(keywords=None, pages=5):
                     "source": "Yahoo"
                 })
 
-    logging.info(f"Yahoo 搜尋完成，共抓到 {len(results)} 則光寶科新聞")
+    logging.info(f"📌 Yahoo 新版搜尋完成，共抓到 {len(results)} 則光寶科新聞")
     return results
 
 
@@ -201,14 +200,10 @@ def save_to_firestore(article_list):
 
     added = 0
     for art in article_list:
-
-        # 以 title + time 做 hash（因為 URL 不存）
         doc_id = doc_id_from_text(art["title"] + art["time"])
-
         ref = doc.document(doc_id)
         if ref.get().exists:
             continue
-
         ref.set(art)
         added += 1
 
@@ -235,9 +230,9 @@ def save_to_local(article_list, filename="result.txt"):
 
 # ---------------- Main ----------------
 def main():
-    logging.info("開始抓取 Yahoo 光寶科新聞")
+    logging.info("開始抓取 Yahoo 光寶科新聞（新版）")
 
-    all_news = fetch_yahoo_all()      # 光寶科所有新聞（無篩選）
+    all_news = fetch_yahoo_all()      # 已更新為新版 Yahoo 爬蟲
 
     save_to_firestore(all_news)
     save_to_local(all_news)
