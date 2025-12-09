@@ -17,7 +17,7 @@ import re
 
 try:
     from dateutil import parser as dateparser
-except Exception:
+except:
     dateparser = None
 
 import firebase_admin
@@ -43,7 +43,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 if not firebase_admin._apps:
     cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if not cred_path:
-        logging.error("請先設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向你的 Firebase key JSON 檔案")
         raise SystemExit("Missing GOOGLE_APPLICATION_CREDENTIALS")
     cred = credentials.Certificate(cred_path)
     firebase_admin.initialize_app(cred)
@@ -82,22 +81,6 @@ def parse_datetime_fuzzy(s):
             return dt.astimezone(timezone.utc)
         except:
             pass
-    try:
-        iso = re.sub(r'(\.\d+)?Z$', '+00:00', s)
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except:
-        pass
-    formats = ["%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
-    for f in formats:
-        try:
-            dt = datetime.strptime(s, f)
-            dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-        except:
-            continue
     return None
 
 def is_recent(dt):
@@ -108,36 +91,37 @@ def is_recent(dt):
     return (now_utc() - dt).total_seconds() <= MAX_HOURS*3600
 
 def contains_keywords(text, keywords):
-    if not text:
-        return False
-    txt = text.lower()
-    for k in keywords:
-        if k.lower() in txt:
-            return True
-    return False
+    text = text.lower()
+    return any(k.lower() in text for k in keywords)
 
 def doc_id_from_url(url):
     return hashlib.sha1(url.encode("utf-8")).hexdigest()
 
-# ---------------- Yahoo 財經抓取 ----------------
+# ---------------- Yahoo 搜尋抓取 ----------------
 def fetch_yahoo_financial(keywords=None, pages=5, per_page_limit=50):
     if keywords is None:
         keywords = KEYWORDS
+
     base = "https://tw.news.yahoo.com"
     results = []
     seen_urls = set()
+
     logging.info("📡 Yahoo 財經抓取開始")
+
     for kw in keywords:
         for page in range(1, pages+1):
             b = (page-1)*10 + 1
             url = f"{base}/search?p={requests.utils.requote_uri(kw)}&sort=time&b={b}"
+
             r = safe_get(url)
             if not r:
                 continue
-            s = BeautifulSoup(r.text, "html.parser")
-            links = s.select("a.js-content-viewer") or s.select("h3 a") or s.select("a[href*='/news/']")
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            links = soup.select("a.js-content-viewer, h3 a, a[href*='/news/']")
+
             for a in links:
-                href = a.get("href") or a.get("data-href")
+                href = a.get("href")
                 if not href:
                     continue
                 if href.startswith("/"):
@@ -145,29 +129,54 @@ def fetch_yahoo_financial(keywords=None, pages=5, per_page_limit=50):
                 if href in seen_urls:
                     continue
                 seen_urls.add(href)
+
                 time.sleep(SLEEP_BETWEEN_REQ)
                 r2 = safe_get(href)
                 if not r2:
                     continue
+
                 s2 = BeautifulSoup(r2.text, "html.parser")
-                title_tag = s2.find("h1")
-                title = clean_text(title_tag.get_text()) if title_tag else ""
+
+                # --- 取得標題 ---
+                title = clean_text(s2.find("h1").get_text()) if s2.find("h1") else ""
+                if not title:
+                    continue
+
+                # --- 必須包含光寶科 ---
+                if not contains_keywords(title, ["光寶科", "光寶", "2301"]):
+                    continue
+
+                # --- 時間解析 ---
                 dt = None
-                time_tag = s2.find("time")
-                if time_tag and time_tag.has_attr("datetime"):
-                    dt = parse_datetime_fuzzy(time_tag["datetime"])
-                if not dt:
-                    meta = s2.find("meta", {"property":"article:published_time"}) or s2.find("meta", {"name":"ptime"})
-                    if meta and meta.get("content"):
-                        dt = parse_datetime_fuzzy(meta.get("content"))
+                t = s2.find("time")
+                if t and t.has_attr("datetime"):
+                    dt = parse_datetime_fuzzy(t["datetime"])
+
                 if not dt or not is_recent(dt):
                     continue
-                paras = s2.select("article p") or s2.select('div[class*="article"] p') or s2.select("p")
-                content = "\n".join([clean_text(p.get_text()) for p in paras if len(clean_text(p.get_text()))>40])
-                if not content:
+
+                # --- 抓內容（新版 Yahoo）---
+                body_candidates = [
+                    s2.select("article p"),
+                    s2.select("div.caas-body p"),
+                    s2.select("div.caas-content p"),
+                    s2.select("div[class*='caas'] p")
+                ]
+
+                content = ""
+                for c in body_candidates:
+                    if c:
+                        content = "\n".join([clean_text(p.get_text()) for p in c])
+                        if len(content) > 50:
+                            break
+
+                if len(content) < 40:
                     continue
+
+                # --- 必須包含財報關鍵字 ---
                 if not contains_keywords(title + " " + content, FIN_KEYWORDS):
                     continue
+
                 results.append({
                     "title": title,
                     "content": content[:2500],
@@ -175,73 +184,57 @@ def fetch_yahoo_financial(keywords=None, pages=5, per_page_limit=50):
                     "source": "Yahoo",
                     "url": href
                 })
+
                 if len(results) >= per_page_limit:
-                    break
-            if len(results) >= per_page_limit:
-                break
+                    return results
+
     logging.info(f"Yahoo 完成，取得 {len(results)} 篇")
     return results
 
-# ---------------- Save to Firestore ----------------
+# ---------------- Firestore ----------------
 def save_to_firestore(article_list):
     if not article_list:
-        logging.info("沒有文章要寫入 Firestore")
+        logging.info("Firestore 無需寫入（0 篇）")
         return
+
     date_key = datetime.now().strftime("%Y%m%d")
-    base_doc = db.collection(COLL_NAME).document(date_key)
-    articles_col = base_doc.collection("articles")
+    doc = db.collection(COLL_NAME).document(date_key).collection("articles")
+
     added = 0
     for art in article_list:
-        uid = doc_id_from_url(art.get("url","") or art.get("title","") + str(art.get("time","")))
-        try:
-            doc_ref = articles_col.document(uid)
-            if doc_ref.get().exists:
-                continue
-            doc_ref.set({
-                "title": art.get("title"),
-                "content": art.get("content"),
-                "time": art.get("time"),
-                "source": art.get("source"),
-                "url": art.get("url"),
-                "fetched_at": now_utc().isoformat()
-            })
-            added += 1
-        except Exception as e:
-            logging.warning(f"寫入單篇失敗: {e}")
-    try:
-        base_doc.collection("meta").document("summary").set({
-            "date": date_key,
-            "total_fetched": len(article_list),
-            "added": added,
-            "updated_at": now_utc().isoformat()
-        })
-    except Exception as e:
-        logging.warning(f"寫入 meta 失敗: {e}")
-    logging.info(f"Firestore 已寫入：新增 {added} 篇（總抓取 {len(article_list)} 篇）")
+        uid = doc_id_from_url(art["url"])
+        ref = doc.document(uid)
 
-# ---------------- Save to local file ----------------
+        if ref.get().exists:
+            continue
+
+        ref.set(art)
+        added += 1
+
+    logging.info(f"Firestore 新增 {added} 篇")
+
+# ---------------- Local TXT ----------------
 def save_to_local(article_list, filename="result.txt"):
     if not article_list:
-        logging.info("沒有文章要寫入本地檔案")
+        logging.info("本地檔案無需寫入（0 篇）")
         return
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            for art in article_list:
-                f.write(f"[{art['time']}] {art['title']}\n")
-                f.write(f"{art['content']}\n")
-                f.write(f"URL: {art['url']}\n")
-                f.write("-"*60 + "\n")
-        logging.info(f"已寫入本地檔案：{filename}")
-    except Exception as e:
-        logging.warning(f"寫入本地檔案失敗: {e}")
+
+    with open(filename, "w", encoding="utf-8") as f:
+        for art in article_list:
+            f.write(f"[{art['time']}] {art['title']}\n")
+            f.write(art['content'] + "\n")
+            f.write(f"URL: {art['url']}\n")
+            f.write("-"*50 + "\n")
+
+    logging.info("已寫入本地 result.txt")
 
 # ---------------- Main ----------------
 def main():
-    logging.info("開始抓取（Yahoo 財經光寶科財報新聞）")
-    all_articles = fetch_yahoo_financial(KEYWORDS, pages=5, per_page_limit=50)
-    save_to_firestore(all_articles)
-    save_to_local(all_articles)
-    logging.info("抓取完成。")
+    logging.info("開始抓取 Yahoo 財報新聞")
+    articles = fetch_yahoo_financial()
+    save_to_firestore(articles)
+    save_to_local(articles)
+    logging.info("全部完成")
 
 if __name__ == "__main__":
     main()
