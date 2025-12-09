@@ -1,253 +1,219 @@
 # -*- coding: utf-8 -*-
 """
-Yahoo 財經新聞抓取（光寶科）
-抓所有光寶科新聞 → 再挑財報/法說/公告
-時間篩選：36 小時
-Firestore：NEWS_LiteOn / YYYYMMDD / articles
-本地：result.txt（永不為空）
+多公司新聞抓取程式（台積電 + 鴻海 + 聯電）
+版本：v7-huggingface（embedding 版 / Yahoo 強化版）
+------------------------------------------------------
+✔ Yahoo 新版 HTML 結構完整支援（2025）
+✔ Firestore 只用日期當 ID
+✔ 儲存新聞 title + content + 漲跌 + embedding
+✔ Hugging Face 免費 Embedding API
+✔ 新聞時間解析，只抓 36 小時內新聞
 """
+
 import os
 import time
-import hashlib
-import logging
+import json
 import requests
-from datetime import datetime, timezone
-from bs4 import BeautifulSoup
-import re
-
-try:
-    from dateutil import parser as dateparser
-except:
-    dateparser = None
-
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+import warnings
 import firebase_admin
 from firebase_admin import credentials, firestore
+import yfinance as yf
 
-# ---------------- Config ----------------
-COLL_NAME = "NEWS_LiteOn"
-KEYWORDS = ["光寶科", "光寶", "2301"]
-FIN_KEYWORDS = ["財報", "法說", "季報", "公告"]
-MAX_HOURS = 36
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
+# ---------------------- 設定 ---------------------- #
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
-    )
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'
 }
 
-REQUEST_TIMEOUT = 12
-MAX_RETRIES = 2
-SLEEP_BETWEEN_REQ = 0.4
+HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+if not HF_TOKEN:
+    raise ValueError("⚠️ 找不到 HF_TOKEN，請在 GitHub Secrets 設定！")
 
+HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-# ---------------- Firestore init ----------------
-if not firebase_admin._apps:
-    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if not cred_path:
-        raise SystemExit("Missing GOOGLE_APPLICATION_CREDENTIALS")
-    cred = credentials.Certificate(cred_path)
-    firebase_admin.initialize_app(cred)
+# Firestore 初始化
+key_dict = json.loads(os.environ["NEWS"])
+cred = credentials.Certificate(key_dict)
+firebase_admin.initialize_app(cred)
 db = firestore.client()
 
+ticker_map = {"台積電": "2330.TW", "鴻海": "2317.TW", "聯電": "2303.TW"}
 
-# ---------------- Helpers ----------------
-session = requests.Session()
-session.headers.update(HEADERS)
+# ---------------------- 時間過濾 ---------------------- #
+def is_recent(published_time, hours=36):
+    """判斷新聞是否在最近 X 小時內"""
+    now = datetime.now().astimezone()
+    return (now - published_time) <= timedelta(hours=hours)
 
-def safe_get(url):
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            r = session.get(url, timeout=REQUEST_TIMEOUT)
-            r.raise_for_status()
-            return r
-        except Exception:
-            time.sleep(0.5 * attempt)
-    return None
-
-def clean_text(s):
-    return re.sub(r"\s+", " ", s).strip() if s else ""
-
-def now_utc():
-    return datetime.now(timezone.utc)
-
-def parse_datetime_fuzzy(s):
-    if not s:
-        return None
+# ---------------------- 股價漲跌 ---------------------- #
+def fetch_stock_change(stock_name):
+    ticker = ticker_map.get(stock_name)
+    if not ticker: return "無資料"
     try:
-        dt = dateparser.parse(s)
-        if dt and dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        df = yf.Ticker(ticker).history(period="2d")
+        if len(df) < 2: return "無資料"
+        last = df['Close'].iloc[-1]
+        prev = df['Close'].iloc[-2]
+        diff = last - prev
+        pct = diff / prev * 100
+        sign = "+" if diff >= 0 else ""
+        return f"{sign}{diff:.2f} ({sign}{pct:.2f}%)"
     except:
-        return None
+        return "無資料"
 
-def is_recent(dt):
-    if not dt:
-        return False
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return (now_utc() - dt).total_seconds() <= MAX_HOURS * 3600
+def add_price_change(news_list, stock_name):
+    change = fetch_stock_change(stock_name)
+    for n in news_list:
+        n["price_change"] = change
+    return news_list
 
-def contains_keywords(text, keywords):
-    t = text.lower()
-    return any(k.lower() in t for k in keywords)
+# ---------------------- Embedding ---------------------- #
+def generate_embedding(text):
+    if not text: return []
+    try:
+        res = requests.post(
+            HF_API_URL,
+            headers=HF_HEADERS,
+            json={"inputs": text[:1000]},
+            timeout=20
+        )
+        data = res.json()
+        if isinstance(data, list):
+            return data
+    except:
+        pass
+    return []
 
-def doc_id_from_url(url):
-    return hashlib.sha1(url.encode("utf-8")).hexdigest()
+# ---------------------- 文章內文 ---------------------- #
+def fetch_article_content(url, source):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
 
+        # Yahoo 新版（2025）
+        if source == 'yahoo':
+            bdys = soup.find("div", {"class": "caas-body"})
+            if bdys:
+                paragraphs = bdys.find_all(["p", "h2"])
+            else:
+                paragraphs = soup.find_all("p")
 
-# ---------------- Yahoo 抓全部光寶新聞 ----------------
-def fetch_yahoo_all(keywords=None, pages=5):
-    if keywords is None:
-        keywords = KEYWORDS
+        else:
+            paragraphs = soup.find_all("p")
 
+        text = "\n".join([
+            p.get_text(strip=True)
+            for p in paragraphs if len(p.get_text(strip=True)) > 40
+        ])
+
+        return text[:1500] + ('...' if len(text) > 1500 else '')
+    except:
+        return "無法取得新聞內容"
+
+# ---------------------- Yahoo 新聞（全修正） ---------------------- #
+def fetch_yahoo_news(keyword="台積電", limit=30):
+    print(f"\n📡 Yahoo：{keyword}")
     base = "https://tw.news.yahoo.com"
-    results = []
-    seen = set()
+    url = f"{base}/search?p={keyword}&sort=time"
 
-    logging.info("📡 Yahoo 搜尋（不篩財報）開始…")
+    news_list, seen = [], set()
 
-    for kw in keywords:
-        for page in range(1, pages + 1):
-            b = (page - 1) * 10 + 1
-            url = f"{base}/search?p={kw}&sort=time&b={b}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, 'html.parser')
 
-            r = safe_get(url)
-            if not r:
+        # 2025 Yahoo 主要選擇器
+        items = soup.select("li.js-stream-content")                 # 主要
+        items += soup.select("div.SerpHoverCard")                   # 部分搜尋結果
+        items += soup.select("h3 a")                                # fallback
+
+        for item in items:
+            if len(news_list) >= limit: break
+
+            # 標題
+            a = item.find("a")
+            if not a: continue
+
+            title = a.get_text(strip=True)
+            if not title or title in seen: continue
+            seen.add(title)
+
+            href = a.get("href")
+            if href and not href.startswith("http"):
+                href = base + href
+
+            # 取得文章時間
+            try:
+                art = requests.get(href, headers=HEADERS)
+                s2 = BeautifulSoup(art.text, 'html.parser')
+                time_tag = s2.find("time")
+                if not time_tag or not time_tag.has_attr("datetime"):
+                    continue
+                published = datetime.fromisoformat(
+                    time_tag["datetime"].replace("Z", "+00:00")
+                ).astimezone()
+                if not is_recent(published, 36):
+                    continue
+            except:
                 continue
 
-            soup = BeautifulSoup(r.text, "html.parser")
-            links = soup.select("a.js-content-viewer, h3 a, a[href*='/news/']")
+            # 內文
+            content = fetch_article_content(href, 'yahoo')
 
-            for a in links:
-                href = a.get("href")
-                if not href:
-                    continue
-                if href.startswith("/"):
-                    href = base + href
-                if href in seen:
-                    continue
-                seen.add(href)
+            news_list.append({
+                "title": title,
+                "content": content,
+                "published_time": published
+            })
 
-                # 抓內頁
-                time.sleep(SLEEP_BETWEEN_REQ)
-                r2 = safe_get(href)
-                if not r2:
-                    continue
+    except Exception as e:
+        print(f"Yahoo 抓取錯誤：{e}")
 
-                s2 = BeautifulSoup(r2.text, "html.parser")
+    return news_list
 
-                # 標題
-                title = clean_text(s2.find("h1").get_text()) if s2.find("h1") else ""
-                if not title:
-                    continue
+# ---------------------- Firestore ---------------------- #
+def save_news(news_list, collection):
+    doc_id = datetime.now().strftime("%Y%m%d")
+    ref = db.collection(collection).document(doc_id)
 
-                # 必須包含光寶關鍵字
-                if not contains_keywords(title, ["光寶", "光寶科", "2301"]):
-                    continue
+    data = {}
+    for i, n in enumerate(news_list, 1):
+        emb = generate_embedding(n.get("content", ""))
+        data[f"news_{i}"] = {
+            "title": n["title"],
+            "price_change": n["price_change"],
+            "content": n["content"],
+            "embedding": emb,
+            "published_time": n["published_time"].strftime("%Y-%m-%d %H:%M")
+        }
 
-                # 時間
-                t = s2.find("time")
-                dt = None
-                if t and t.has_attr("datetime"):
-                    dt = parse_datetime_fuzzy(t["datetime"])
+    ref.set(data)
+    print(f"✅ Firestore 儲存完成：{collection}/{doc_id}")
 
-                if not dt or not is_recent(dt):
-                    continue
-
-                # 抓內文（強化 selector）
-                selectors = [
-                    "article p",
-                    "div.caas-body p",
-                    "div.caas-content p",
-                    "div[class*='caas'] p"
-                ]
-                content = ""
-                for sel in selectors:
-                    paras = s2.select(sel)
-                    if paras:
-                        text = "\n".join([clean_text(p.get_text()) for p in paras])
-                        if len(text) > 40:
-                            content = text
-                            break
-                if len(content) < 30:
-                    continue
-
-                results.append({
-                    "title": title,
-                    "content": content[:2500],
-                    "time": dt.isoformat(),
-                    "url": href,
-                    "source": "Yahoo"
-                })
-
-    logging.info(f"Yahoo 搜尋完成，共抓到 {len(results)} 則光寶科新聞（尚未篩財報）")
-    return results
-
-
-# ---------------- 過濾財報/法說類 ----------------
-def filter_financial_news(articles):
-    fin = []
-    for a in articles:
-        if contains_keywords(a["title"] + " " + a["content"], FIN_KEYWORDS):
-            fin.append(a)
-    logging.info(f"經財報篩選後，共 {len(fin)} 則")
-    return fin
-
-
-# ---------------- Firestore ----------------
-def save_to_firestore(article_list):
-    if not article_list:
-        logging.info("Firestore 無需寫入（0 篇）")
-        return
-
-    date_key = datetime.now().strftime("%Y%m%d")
-    doc = db.collection(COLL_NAME).document(date_key).collection("articles")
-
-    added = 0
-    for art in article_list:
-        uid = doc_id_from_url(art["url"])
-        ref = doc.document(uid)
-        if ref.get().exists:
-            continue
-        ref.set(art)
-        added += 1
-
-    logging.info(f"Firestore 新增 {added} 篇")
-
-
-# ---------------- Local TXT ----------------
-def save_to_local(article_list, filename="result.txt"):
-    with open(filename, "w", encoding="utf-8") as f:
-
-        if not article_list:
-            f.write("今日沒有任何符合（財報/法說/公告）的光寶科新聞。\n")
-            logging.info("result.txt 已寫入（無新聞但不為空）")
-            return
-
-        for art in article_list:
-            f.write(f"[{art['time']}] {art['title']}\n")
-            f.write(art['content'] + "\n")
-            f.write(f"URL: {art['url']}\n")
-            f.write("-" * 60 + "\n")
-
-    logging.info("result.txt 已寫入（有內容）")
-
-
-# ---------------- Main ----------------
-def main():
-    logging.info("開始抓取 Yahoo 光寶科新聞（完整模式）")
-
-    all_news = fetch_yahoo_all()          # 抓所有光寶新聞
-    fin_news = filter_financial_news(all_news)  # 篩財報/法說/公告
-
-    save_to_firestore(fin_news)
-    save_to_local(fin_news)
-
-    logging.info("抓取完成。")
-
+# ---------------------- 主程式 ---------------------- #
 if __name__ == "__main__":
-    main()
+
+    # 台積電
+    tsmc = fetch_yahoo_news("台積電", 30)
+    if tsmc:
+        tsmc = add_price_change(tsmc, "台積電")
+        save_news(tsmc, "NEWS")
+
+    # 鴻海
+    fox = fetch_yahoo_news("鴻海", 30)
+    if fox:
+        fox = add_price_change(fox, "鴻海")
+        save_news(fox, "NEWS_Foxxcon")
+
+    # 聯電
+    umc = fetch_yahoo_news("聯電", 30)
+    if umc:
+        umc = add_price_change(umc, "聯電")
+        save_news(umc, "NEWS_UMC")
+
+    print("\n🎉 全部新聞抓取完成！")
