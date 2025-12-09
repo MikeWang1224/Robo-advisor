@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Yahoo 財經新聞抓取（光寶科）
-抓所有光寶科新聞 → 再挑財報/法說/公告
+只抓光寶科 → 不篩財報/法說/公告
 時間篩選：36 小時
 Firestore：NEWS_LiteOn / YYYYMMDD / articles
-本地：result.txt（永不為空）
+本地：result.txt（不留空，也不寫 URL）
 """
+
 import os
 import time
 import hashlib
@@ -26,7 +27,6 @@ from firebase_admin import credentials, firestore
 # ---------------- Config ----------------
 COLL_NAME = "NEWS_LiteOn"
 KEYWORDS = ["光寶科", "光寶", "2301"]
-FIN_KEYWORDS = ["財報", "法說", "季報", "公告"]
 MAX_HOURS = 36
 
 HEADERS = {
@@ -50,6 +50,7 @@ if not firebase_admin._apps:
         raise SystemExit("Missing GOOGLE_APPLICATION_CREDENTIALS")
     cred = credentials.Certificate(cred_path)
     firebase_admin.initialize_app(cred)
+
 db = firestore.client()
 
 
@@ -95,8 +96,8 @@ def contains_keywords(text, keywords):
     t = text.lower()
     return any(k.lower() in t for k in keywords)
 
-def doc_id_from_url(url):
-    return hashlib.sha1(url.encode("utf-8")).hexdigest()
+def doc_id_from_text(t):
+    return hashlib.sha1(t.encode("utf-8")).hexdigest()
 
 
 # ---------------- Yahoo 抓全部光寶新聞 ----------------
@@ -108,7 +109,7 @@ def fetch_yahoo_all(keywords=None, pages=5):
     results = []
     seen = set()
 
-    logging.info("📡 Yahoo 搜尋（不篩財報）開始…")
+    logging.info("📡 Yahoo 搜尋（光寶科）開始…")
 
     for kw in keywords:
         for page in range(1, pages + 1):
@@ -141,11 +142,12 @@ def fetch_yahoo_all(keywords=None, pages=5):
                 s2 = BeautifulSoup(r2.text, "html.parser")
 
                 # 標題
-                title = clean_text(s2.find("h1").get_text()) if s2.find("h1") else ""
-                if not title:
+                h1 = s2.find("h1")
+                if not h1:
                     continue
+                title = clean_text(h1.get_text())
 
-                # 必須包含光寶關鍵字
+                # 必須包含光寶
                 if not contains_keywords(title, ["光寶", "光寶科", "2301"]):
                     continue
 
@@ -158,7 +160,7 @@ def fetch_yahoo_all(keywords=None, pages=5):
                 if not dt or not is_recent(dt):
                     continue
 
-                # 抓內文（強化 selector）
+                # 內文
                 selectors = [
                     "article p",
                     "div.caas-body p",
@@ -173,6 +175,7 @@ def fetch_yahoo_all(keywords=None, pages=5):
                         if len(text) > 40:
                             content = text
                             break
+
                 if len(content) < 30:
                     continue
 
@@ -180,22 +183,11 @@ def fetch_yahoo_all(keywords=None, pages=5):
                     "title": title,
                     "content": content[:2500],
                     "time": dt.isoformat(),
-                    "url": href,
                     "source": "Yahoo"
                 })
 
-    logging.info(f"Yahoo 搜尋完成，共抓到 {len(results)} 則光寶科新聞（尚未篩財報）")
+    logging.info(f"Yahoo 搜尋完成，共抓到 {len(results)} 則光寶科新聞")
     return results
-
-
-# ---------------- 過濾財報/法說類 ----------------
-def filter_financial_news(articles):
-    fin = []
-    for a in articles:
-        if contains_keywords(a["title"] + " " + a["content"], FIN_KEYWORDS):
-            fin.append(a)
-    logging.info(f"經財報篩選後，共 {len(fin)} 則")
-    return fin
 
 
 # ---------------- Firestore ----------------
@@ -209,10 +201,14 @@ def save_to_firestore(article_list):
 
     added = 0
     for art in article_list:
-        uid = doc_id_from_url(art["url"])
-        ref = doc.document(uid)
+
+        # 以 title + time 做 hash（因為 URL 不存）
+        doc_id = doc_id_from_text(art["title"] + art["time"])
+
+        ref = doc.document(doc_id)
         if ref.get().exists:
             continue
+
         ref.set(art)
         added += 1
 
@@ -224,14 +220,14 @@ def save_to_local(article_list, filename="result.txt"):
     with open(filename, "w", encoding="utf-8") as f:
 
         if not article_list:
-            f.write("今日沒有任何符合（財報/法說/公告）的光寶科新聞。\n")
-            logging.info("result.txt 已寫入（無新聞但不為空）")
+            f.write("今日沒有任何光寶科新聞。\n")
+            logging.info("result.txt 已寫入（無新聞）")
             return
 
         for art in article_list:
             f.write(f"[{art['time']}] {art['title']}\n")
-            f.write(art['content'] + "\n")
-            f.write(f"URL: {art['url']}\n")
+            f.write(art["content"] + "\n")
+            f.write(f"來源：{art['source']}\n")
             f.write("-" * 60 + "\n")
 
     logging.info("result.txt 已寫入（有內容）")
@@ -239,13 +235,12 @@ def save_to_local(article_list, filename="result.txt"):
 
 # ---------------- Main ----------------
 def main():
-    logging.info("開始抓取 Yahoo 光寶科新聞（完整模式）")
+    logging.info("開始抓取 Yahoo 光寶科新聞")
 
-    all_news = fetch_yahoo_all()          # 抓所有光寶新聞
-    fin_news = filter_financial_news(all_news)  # 篩財報/法說/公告
+    all_news = fetch_yahoo_all()      # 光寶科所有新聞（無篩選）
 
-    save_to_firestore(fin_news)
-    save_to_local(fin_news)
+    save_to_firestore(all_news)
+    save_to_local(all_news)
 
     logging.info("抓取完成。")
 
