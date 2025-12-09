@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Yahoo 財經新聞抓取（光寶科）
-改為可正常抓到新聞的新版爬蟲：
-→ Yahoo 搜尋頁現在改成 React，新聞列表存於 __NEXT_DATA__ JSON
-→ 用 requests + JSON 解析即可穩定取得結果
+★ 2025最新版 Yahoo 搜尋爬蟲（不再使用 __NEXT_DATA__，改使用 application/json）
+★ 維持你原本架構：關鍵字判斷 / 36 小時內 / Firestore 寫入 / 本地 result.txt
 """
 
 import os
@@ -58,10 +57,10 @@ db = firestore.client()
 session = requests.Session()
 session.headers.update(HEADERS)
 
-def safe_get(url):
+def safe_get(url, params=None):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            r = session.get(url, timeout=REQUEST_TIMEOUT)
+            r = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             return r
         except Exception:
@@ -100,90 +99,111 @@ def doc_id_from_text(t):
     return hashlib.sha1(t.encode("utf-8")).hexdigest()
 
 
-# ---------------- Yahoo 新版爬蟲（可正常抓新聞） ----------------
+# ---------------- Yahoo 搜尋（2025 最新版） ----------------
 def fetch_yahoo_all(keywords=None, pages=5):
     if keywords is None:
         keywords = KEYWORDS
 
-    base = "https://tw.news.yahoo.com"
+    base = "https://tw.search.yahoo.com/search"
     results = []
-    seen_url = set()
+    seen = set()
 
     logging.info("📡 Yahoo 新版搜尋開始…")
 
     for kw in keywords:
-        for page in range(1, pages + 1):
-            b = (page - 1) * 10 + 1
-            url = f"{base}/search?p={kw}&sort=time&b={b}"
+        for pg in range(1, pages + 1):
+            params = {
+                "p": kw,
+                "b": (pg - 1) * 10 + 1,
+                "pz": 10,
+            }
 
-            r = safe_get(url)
+            r = safe_get(base, params=params)
             if not r:
                 continue
 
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # 解析 __NEXT_DATA__（整個新聞列表都在這裡）
-            script_tag = soup.find("script", id="__NEXT_DATA__", type="application/json")
+            # Yahoo 新版搜尋 JSON，不再使用 __NEXT_DATA__
+            script_tag = soup.find("script", {"type": "application/json"})
             if not script_tag:
-                logging.warning("找不到 __NEXT_DATA__，Yahoo 搜尋頁已改版？")
+                logging.warning("找不到 application/json，Yahoo 搜尋頁可能更新？")
                 continue
 
             try:
                 data = json.loads(script_tag.string)
-                items = data["props"]["pageProps"]["initialState"]["search"]["news"]["items"]
             except:
-                logging.warning("Yahoo 搜尋 JSON 結構不符")
+                logging.warning("JSON 格式錯誤，略過")
                 continue
 
-            # 處理每一則新聞
-            for item in items:
-                link = item.get("link")
-                title = clean_text(item.get("title") or "")
-                pub = item.get("pubDate")
+            modules = (
+                data.get("props", {})
+                    .get("pageProps", {})
+                    .get("layout", {})
+                    .get("main", {})
+                    .get("modules", [])
+            )
 
-                if not link or link in seen_url:
-                    continue
-                seen_url.add(link)
-
-                # 關鍵字過濾（光寶）
-                if not contains_keywords(title, ["光寶", "光寶科", "2301"]):
+            for m in modules:
+                if m.get("name") != "web":
                     continue
 
-                dt = parse_datetime_fuzzy(pub)
-                if not dt or not is_recent(dt):
-                    continue
+                for item in m.get("data", []):
+                    url = item.get("url")
+                    title = item.get("title")
+                    src = item.get("source")
+                    ts = item.get("date")
 
-                # 抓內文
-                time.sleep(SLEEP_BETWEEN_REQ)
-                r2 = safe_get(link)
-                if not r2:
-                    continue
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
 
-                s2 = BeautifulSoup(r2.text, "html.parser")
+                    # 關鍵字過濾
+                    if not contains_keywords(title or "", ["光寶", "光寶科", "2301"]):
+                        continue
 
-                content = ""
-                for sel in [
-                    "article p",
-                    "div.caas-body p",
-                    "div.caas-content p",
-                    "div[class*='caas'] p"
-                ]:
-                    paras = s2.select(sel)
-                    if paras:
-                        text = "\n".join([clean_text(p.get_text()) for p in paras])
-                        if len(text) > 40:
-                            content = text
-                            break
+                    # 時間
+                    if ts:
+                        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                    else:
+                        dt = None
 
-                if len(content) < 30:
-                    continue
+                    if not dt or not is_recent(dt):
+                        continue
 
-                results.append({
-                    "title": title,
-                    "content": content[:2500],
-                    "time": dt.isoformat(),
-                    "source": "Yahoo"
-                })
+                    # 抓內文
+                    time.sleep(SLEEP_BETWEEN_REQ)
+                    r2 = safe_get(url)
+                    if not r2:
+                        continue
+
+                    s2 = BeautifulSoup(r2.text, "html.parser")
+                    content = ""
+
+                    for sel in [
+                        "article p",
+                        "div.caas-body p",
+                        "div.caas-content p",
+                        "div[class*='caas'] p"
+                    ]:
+                        paras = s2.select(sel)
+                        if paras:
+                            text = "\n".join([clean_text(p.get_text()) for p in paras])
+                            if len(text) > 40:
+                                content = text
+                                break
+
+                    if len(content) < 30:
+                        continue
+
+                    results.append({
+                        "title": title,
+                        "content": content[:2500],
+                        "time": dt.isoformat(),
+                        "source": src or "Yahoo",
+                    })
+
+            logging.info(f"關鍵字 {kw} 第 {pg} 頁完成，目前累積 {len(results)} 則")
 
     logging.info(f"📌 Yahoo 新版搜尋完成，共抓到 {len(results)} 則光寶科新聞")
     return results
@@ -232,7 +252,7 @@ def save_to_local(article_list, filename="result.txt"):
 def main():
     logging.info("開始抓取 Yahoo 光寶科新聞（新版）")
 
-    all_news = fetch_yahoo_all()      # 已更新為新版 Yahoo 爬蟲
+    all_news = fetch_yahoo_all()
 
     save_to_firestore(all_news)
     save_to_local(all_news)
