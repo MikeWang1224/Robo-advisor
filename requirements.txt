@@ -8,3 +8,4 @@ rich==14.1.0
 firebase-admin>=6.0.0
 selenium>=4.10.0
 feedparser==6.0.10
+yfinance==0.2.54
