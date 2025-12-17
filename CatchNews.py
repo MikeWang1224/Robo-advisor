@@ -5,7 +5,7 @@ Yahoo 財經新聞抓取（光寶科）
 時間過濾：36 小時內
 Firestore 存儲：NEWS_LiteOn / YYYYMMDD / articles -> 每篇一個 doc
 本地備份：result.txt
-"""
+""" 
 import os
 import time
 import hashlib
