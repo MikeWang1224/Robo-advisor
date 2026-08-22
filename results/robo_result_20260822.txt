@@ -1,0 +1,5 @@
+📡 抓取 Yahoo 新聞
+📡 抓取 鉅亨網
+鉅亨網抓取錯誤： HTTPSConnectionPool(host='api.cnyes.com', port=443): Max retries exceeded with url: /media/api/v1/search/list?keyword=%E5%85%89%E5%AF%B6%E7%A7%91&limit=50 (Caused by ConnectTimeoutError(<HTTPSConnection(host='api.cnyes.com', port=443) at 0x7f6720b42c10>, 'Connection to api.cnyes.com timed out. (connect timeout=10)'))
+🔍 共抓到 0 則光寶科相關新聞（3 天內）
+🎉 光寶科新聞抓取 + Groq 分析完成！
